@@ -1,0 +1,66 @@
+[project]
+name = "opengraph"
+version = "0.1.0"
+description = "A symbolic graphing calculator: typeset math editor, live plots and SymPy-backed exact algebra and calculus"
+readme = "README.md"
+authors = [
+    { name = "ThanapatFungpharit" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "flet[desktop]>=1.0.4",
+    "fonttools>=4.60",
+    "gmpy2>=2.3.2",
+    "numpy>=2.5.4",
+    "pillow>=11.0",
+    "sympy>=1.14.0",
+]
+
+[project.scripts]
+opengraph = "opengraph.app:main"
+
+[build-system]
+# setup.py compiles the optional Cython kernels against gmpy2's bundled MPFR.
+requires = ["setuptools>=80", "cython>=3.1", "gmpy2>=2.3.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opengraph = ["ui/assets/fonts/*"]
+
+[tool.uv]
+# Rebuild the kernels when their sources change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "src/opengraph/native/*.pyx" }]
+
+[dependency-groups]
+dev = [
+    "cython>=3.3.0",
+    "fastapi<0.140",  # flet-web 1.0.4 passes openapi_prefix, removed in 0.140
+    "flet-web>=1.0.4",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+    "setuptools>=84.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "BLE"]
+
+[tool.mypy]
+files = ["src"]
+strict = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["opengraph.document", "opengraph.graph.settings", "opengraph.json_types"]
+disallow_any_explicit = true
+disallow_any_unimported = true
