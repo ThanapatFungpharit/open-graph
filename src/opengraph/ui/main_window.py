@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import re
+import sys
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -235,6 +237,17 @@ cancellable background tasks. Save/open .ograph.json; export PNG/JPEG.
 
 Shortcut = tuple[bool, bool, str]  # command (Ctrl/⌘), Shift, key label
 
+MACOS = sys.platform == "darwin"
+_COMMAND_SHORTCUT = re.compile(r"Ctrl\+(Shift\+)?(?=[A-Z0-9=,-])")
+
+
+def shortcut_label(text: str) -> str:
+    """``text`` with its command shortcuts written for this platform: ``Ctrl+Shift+S``
+    becomes ``⇧⌘S`` on macOS, where the Command key triggers them (Ctrl+wheel stays)."""
+    if not MACOS:
+        return text
+    return _COMMAND_SHORTCUT.sub(lambda match: "⇧⌘" if match[1] else "⌘", text)
+
 
 class _MenuItem:
     """A menu entry with a shortcut hint and an optional check mark."""
@@ -252,7 +265,7 @@ class _MenuItem:
         self._checked = False
         content: ft.Control = ft.Text(label)
         if shortcut:
-            hint = ft.Text(shortcut, size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+            hint = ft.Text(shortcut_label(shortcut), size=12, color=ft.Colors.ON_SURFACE_VARIANT)
             content = ft.Row([content, ft.Container(width=28), hint], tight=True, spacing=0)
         self.button = ft.MenuItemButton(
             content=content,
@@ -314,7 +327,7 @@ class MainWindow:
         # panel, where tasks can be cancelled.
         self.tasks_button = ft.TextButton(
             "",
-            tooltip="Show running tasks (Ctrl+J)",
+            tooltip=shortcut_label("Show running tasks (Ctrl+J)"),
             visible=False,
             on_click=lambda _: self.show_tasks(),
         )
@@ -788,7 +801,7 @@ class MainWindow:
                 ft.Column(
                     [
                         ft.Markdown(
-                            syntax_reference(),
+                            shortcut_label(syntax_reference()),
                             selectable=True,
                             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                             code_theme=ft.MarkdownCodeTheme.GITHUB,

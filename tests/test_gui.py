@@ -10,10 +10,10 @@ import pytest
 from opengraph.controller import COMPILE_DELAY_MS, LIVE_COMPILE_MS
 from opengraph.document import SliderRange
 from opengraph.engine.plots import ExplicitPlot, ImplicitPlot, PointSetPlot
-from opengraph.ui import dialogs, fonts, runtime
+from opengraph.ui import dialogs, fonts, main_window, runtime
 from opengraph.ui.expression_panel import ExpressionEdit, SliderSettingsDialog
 from opengraph.ui.geometry import Point
-from opengraph.ui.main_window import MainWindow, syntax_reference
+from opengraph.ui.main_window import MainWindow, shortcut_label, syntax_reference
 from opengraph.ui.mathedit.layout import Typesetter
 from opengraph.ui.mathedit.nodes import Frac, Paren, Position, Sup
 from tests.support import (
@@ -1151,3 +1151,20 @@ def test_symbolic_algebra_background_result_can_be_bound_and_reused(window: Main
     assert not result.pending and isinstance(result.plot, ExplicitPlot)
     assert result.plot.evaluate(2.0) == pytest.approx(10)
     assert len([task for task in c.tasks.tasks() if task.operation == "cas"]) == 1
+
+
+def test_shortcut_labels_follow_the_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_window, "MACOS", False)
+    assert shortcut_label("Save (Ctrl+Shift+S)") == "Save (Ctrl+Shift+S)"
+    monkeypatch.setattr(main_window, "MACOS", True)
+    assert shortcut_label("Ctrl+Shift+S, Ctrl+J, Ctrl+= and Ctrl+,") == "⇧⌘S, ⌘J, ⌘= and ⌘,"
+    # Wheel zoom reads the Control key itself, so its hints are left alone.
+    assert shortcut_label("Ctrl/Shift+wheel, Ctrl+wheel") == "Ctrl/Shift+wheel, Ctrl+wheel"
+
+
+@pytest.mark.parametrize("modifier", ["ctrl", "meta"])
+def test_ctrl_or_command_triggers_menu_shortcuts(window: MainWindow, modifier: str) -> None:
+    window._focus_graph()
+    count = len(window.controller.document.items)
+    assert window.handle_key("N", shift=True, **{modifier: True})
+    assert len(window.controller.document.items) == count + 1

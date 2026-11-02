@@ -6,9 +6,11 @@ symbolic derivatives, antiderivatives, limits, Taylor polynomials and exact root
 
 ## Run and check
 
-Python 3.13 or newer is required.
+Python 3.13 or newer is required. OpenGraph runs on Windows, macOS and Linux; CI
+tests all three (`.github/workflows/ci.yml`). The same commands work in PowerShell
+and POSIX shells:
 
-```powershell
+```bash
 uv sync
 uv run opengraph
 uv run pytest
@@ -19,15 +21,22 @@ uv run mypy
 `uv sync` compiles the Cython kernels in `src/opengraph/native` (geometry loops and
 an MPFR evaluator linked against the MPFR library bundled with gmpy2). This needs a C
 compiler: on Windows, Visual Studio Build Tools with the "Desktop development with
-C++" workload. Without one the install still succeeds and the same results come from
-the Python fallbacks, more slowly; set `OPENGRAPH_REQUIRE_NATIVE=1` to make a failed
-build an error instead. After editing a `.pyx` file, `uv sync` rebuilds it.
+C++" workload; on macOS, the Xcode Command Line Tools (`xcode-select --install`); on
+Linux, `gcc` (for example `sudo apt install build-essential` or
+`sudo dnf install gcc`). The kernels link against the MPFR and GMP libraries inside
+the gmpy2 wheel, so no system MPFR is needed. Without a compiler the install still
+succeeds and the same results come from the Python fallbacks, more slowly; set
+`OPENGRAPH_REQUIRE_NATIVE=1` to make a failed build an error instead. After editing a `.pyx` file, `uv sync` rebuilds it.
 `OPENGRAPH_PURE_PYTHON=1` runs without the compiled kernels (the test suite passes
 both ways).
 
 The application accepts an optional `.ograph.json` document path. F1 opens the
 syntax reference, which includes the function registry. Ctrl+Shift+L switches the
-editor between typeset and plain-text input.
+editor between typeset and plain-text input. On macOS every Ctrl shortcut uses the
+Command key instead (⇧⌘L), and the menus and reference show it that way; Ctrl+wheel
+and Shift+wheel zoom keep the Control key. Preferences are stored in
+`%APPDATA%\OpenGraph`, `~/Library/Application Support/OpenGraph` or
+`$XDG_CONFIG_HOME/opengraph`.
 
 `uv run opengraph --web` serves the same interface at http://localhost:8550 instead
 of opening a window (`--port=N` picks another port); this needs the `flet-web`
