@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import threading
 
-import gmpy2
 import numpy as np
 import pytest
 from PIL import Image
@@ -15,6 +14,7 @@ from opengraph.engine import precise
 from opengraph.engine.ast import Node
 from opengraph.engine.compiler import compile_expression
 from opengraph.engine.evaluator import NumericFunction
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.plots import ExplicitPlot, Plot
 from opengraph.engine.sampling import ViewRect
 from opengraph.graph import rendering

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 import sys
 from collections.abc import Callable
@@ -18,15 +19,22 @@ from opengraph.engine.builtins import CONSTANTS, FUNCTIONS, SPECIAL_FORMS
 from opengraph.engine.formatting import format_value
 from opengraph.graph.canvas import GraphCanvas
 from opengraph.graph.settings import GraphSettings, GraphToggle
-from opengraph.preferences import Preferences
+from opengraph.preferences import Preferences, config_dir
 from opengraph.tasks import TaskState, format_duration
 from opengraph.ui import dialogs, fonts, runtime, theme
 from opengraph.ui.expression_panel import ExpressionPanel
 from opengraph.ui.graph_settings import GraphSettingsDialog
+from opengraph.ui.keypad import MathKeypad
 from opengraph.ui.mathedit.widget import focused_editor
 from opengraph.ui.tasks_dialog import TasksDialog
 
+log = logging.getLogger(__name__)
 FILE_EXTENSIONS = ["json"]  # .ograph.json documents
+COMPACT_WIDTH = 720  # narrower than this, the graph goes above the expressions
+PANEL_SHARE = 0.42  # of the window's height, for the expressions on a narrow screen
+PANEL_MIN_HEIGHT = 120
+GRAPH_MIN_HEIGHT = 120
+AUTOSAVE_NAME = "autosave.ograph.json"
 THEME_LABELS = {"light": "Light", "dark": "Dark", "system": "System"}
 STATUS_MS = 6000
 PANEL_MIN, PANEL_MAX = 260, 900
@@ -86,6 +94,24 @@ _PLOT_SYNTAX = (
     (
         "`point[1, 2]`, `p = point[1, 2]`",
         "Points and vectors. Points never introduce an implicit parameter.",
+    ),
+    (
+        "`z = x^2 - y^2`, `x = y z`",
+        (
+            "A surface. Any equation that uses z draws in space, and the graph turns into a "
+            "3D view while such a row is visible. z is always a coordinate, like x and y."
+        ),
+    ),
+    (
+        "`x^2 + y^2 + z^2 = 9`",
+        "An implicit surface, sampled numerically; small features may be missed.",
+    ),
+    (
+        "`point[1, 2, 3]`, `parametric(cos(u), sin(u), u for u in [0, 6pi])`",
+        (
+            "Points and curves in space. With `t = [0, 6pi]`, `point[cos(t), sin(t), t]` "
+            "draws the same curve. Rows without z stay flat in the plane z = 0."
+        ),
     ),
     (
         "`list[1, 2, 3]`, `list[1...10]`",
@@ -232,6 +258,13 @@ Tables define finite column lists and support formula columns, CSV import, point
 lines. Literal numeric definitions have sliders. Undefined names offer Add slider and,
 where meaningful, Solve for. Drag to pan; wheel zooms at the cursor. Ctrl+J opens
 cancellable background tasks. Save/open .ograph.json; export PNG/JPEG.
+
+In a 3D view, drag to turn the view and Shift+drag to pan; the wheel zooms, Ctrl+wheel
+only x and y, and Shift+wheel only z. Arrow keys turn the view and Ctrl+0 resets it.
+
+On a touch screen, one finger pans (or turns a 3D view) and two fingers pinch to zoom and
+move. Tap or press and hold to read coordinates. The row of keys above the keyboard moves
+the caret and types symbols; press and hold an expression for copy and paste.
 """
 
 
@@ -264,7 +297,7 @@ class _MenuItem:
         self.checkable = checkable
         self._checked = False
         content: ft.Control = ft.Text(label)
-        if shortcut:
+        if shortcut and not runtime.device.touch:
             hint = ft.Text(shortcut_label(shortcut), size=12, color=ft.Colors.ON_SURFACE_VARIANT)
             content = ft.Row([content, ft.Container(width=28), hint], tight=True, spacing=0)
         self.button = ft.MenuItemButton(
@@ -352,6 +385,7 @@ class MainWindow:
         # A hairline between the panel and the graph, in a wider grab area; it takes the
         # accent colour while hovered or dragged.
         self._splitter_hover = False
+        self._panel_width = float(self.panel.control.width or 340)
         self._splitter_line = ft.Container(width=1)
         self.splitter = ft.GestureDetector(
             content=ft.Container(self._splitter_line, width=7, alignment=ft.Alignment.CENTER),
@@ -360,6 +394,21 @@ class MainWindow:
             on_enter=lambda _: self._set_splitter_hover(True),
             on_exit=lambda _: self._set_splitter_hover(False),
         )
+        self._compact = False
+        self._size = (0.0, 0.0)
+        self._panel_share = PANEL_SHARE
+        self._splitter_row_line = ft.Container(height=1)
+        self.row_splitter = ft.GestureDetector(
+            content=ft.Container(
+                self._splitter_row_line,
+                height=18 if runtime.device.touch else 7,
+                alignment=ft.Alignment.CENTER,
+            ),
+            mouse_cursor=ft.MouseCursor.RESIZE_ROW,
+            on_vertical_drag_update=self._on_row_splitter_drag,
+        )
+        self.keypad = MathKeypad()
+        runtime.focus_tracker.changed.connect(self._update_keypad)
         self.status_bar = ft.Container(
             ft.Row(
                 [self.status, self.tasks_button, self.progress, self.coords],
@@ -373,15 +422,18 @@ class MainWindow:
             [self.canvas.control, self.settings_dialog.control, self.tasks_dialog.control],
             expand=True,
         )
-        self.body = ft.Row(
-            [self.panel.control, self.splitter, self.graph_area],
+        self.body: ft.Row | ft.Column = self._wide_body()
+        self.body_host = ft.Container(self.body, expand=True)
+        # Tracks the modifier keys (Ctrl/Shift+wheel, Shift+click) for the whole window.
+        self.frame = ft.Column(
+            [self.menu_band, self.body_host, self.keypad.control, self.status_bar],
             spacing=0,
             expand=True,
-            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        # Tracks the modifier keys (Ctrl/Shift+wheel, Shift+click) for the whole window.
+        # The floating panels are over the graph, or over everything on a narrow screen.
+        self.overlay = ft.Stack([self.frame], expand=True, fit=ft.StackFit.EXPAND)
         self.keyboard = ft.KeyboardListener(
-            ft.Column([self.menu_band, self.body, self.status_bar], spacing=0, expand=True),
+            self.overlay,
             on_key_down=lambda e: runtime.modifiers.update(e.key, True),
             on_key_up=lambda e: runtime.modifiers.update(e.key, False),
         )
@@ -394,6 +446,79 @@ class MainWindow:
         self.apply_theme(self.theme_mode)
         self.controller.new_document()
         self._update_title()
+
+    # -- layout ----------------------------------------------------------------------------
+    def _wide_body(self) -> ft.Row:
+        return ft.Row(
+            [self.panel.control, self.splitter, self.graph_area],
+            spacing=0,
+            expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+
+    def _narrow_body(self) -> ft.Column:
+        return ft.Column(
+            [self.graph_area, self.row_splitter, self.panel.control],
+            spacing=0,
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+
+    @property
+    def compact(self) -> bool:
+        return self._compact
+
+    def resize(self, width: float, height: float) -> None:
+        """The window's size: a narrow one has the graph above the expressions."""
+        self._size = (width, height)
+        compact = width < COMPACT_WIDTH
+        changed = compact != self._compact
+        self._compact = compact
+        if changed:
+            self.body = self._narrow_body() if compact else self._wide_body()
+            self.body_host.content = self.body
+            self.panel.control.width = None if compact else self._panel_width
+            self.coords.visible = not compact
+            self.progress.width = 60 if compact else 160
+            self._move_floating_panels(compact)
+        if compact:
+            self._fit_panel_height()
+        elif changed:
+            self.panel.control.height = None
+        if changed:
+            runtime.push(self.control)
+        else:
+            runtime.push(self.panel.control)
+
+    def _move_floating_panels(self, compact: bool) -> None:
+        panels = [self.settings_dialog.control, self.tasks_dialog.control]
+        old, new = (self.graph_area, self.overlay) if compact else (self.overlay, self.graph_area)
+        old.controls = [control for control in old.controls if control not in panels]
+        new.controls = [*new.controls, *panels]
+        self.settings_dialog.set_compact(compact)
+        self.tasks_dialog.set_compact(compact)
+
+    def _fit_panel_height(self) -> None:
+        height = self._size[1]
+        wanted = height * self._panel_share
+        most = max(PANEL_MIN_HEIGHT, height - GRAPH_MIN_HEIGHT - 110)  # bars and keys
+        self.panel.control.height = round(min(max(wanted, PANEL_MIN_HEIGHT), most))
+
+    def _on_row_splitter_drag(self, event: ft.DragUpdateEvent[ft.GestureDetector]) -> None:
+        height = self._size[1]
+        if not height:
+            return
+        current = float(self.panel.control.height or height * self._panel_share)
+        self._panel_share = (current - (event.primary_delta or 0.0)) / height
+        self._fit_panel_height()
+        self._panel_share = float(self.panel.control.height or current) / height
+        runtime.push(self.panel.control)
+
+    def _update_keypad(self) -> None:
+        shown = runtime.device.touch and focused_editor() is not None
+        if shown != self.keypad.control.visible:
+            self.keypad.control.visible = shown
+            runtime.push(self.keypad.control)
 
     # -- menus -----------------------------------------------------------------------------
     def _item(
@@ -481,8 +606,12 @@ class MainWindow:
                         *buttons(file_items[:4]),
                         divider(),
                         file_items[4].button,
-                        divider(),
-                        file_items[5].button,
+                        # Android and iOS apps are closed by the system, never by themselves.
+                        *(
+                            []
+                            if runtime.device.native_mobile
+                            else [divider(), file_items[5].button]
+                        ),
                     ],
                 ),
                 menu("Edit", buttons(edit_items)),
@@ -560,6 +689,7 @@ class MainWindow:
     def _set_range(self, axis: str, lo: float, hi: float) -> None:
         if not self.canvas.set_range(axis, lo, hi):
             log_axis = self.canvas.viewport.x_log if axis == "x" else self.canvas.viewport.y_log
+            log_axis = log_axis and not self.canvas.view3d.active
             reason = " and positive on a logarithmic axis" if log_axis else ""
             self.show_message(f"The {axis}-axis minimum must be less than its maximum{reason}")
         self._update_dialog_ranges()
@@ -567,8 +697,9 @@ class MainWindow:
     def _update_dialog_ranges(self) -> None:
         dialog = self.settings_dialog
         if dialog.is_visible():
-            vp = self.canvas.viewport
-            dialog.set_ranges(vp.range("x"), vp.range("y"))
+            canvas = self.canvas
+            z = canvas.axis_range("z") if canvas.view3d.active else None
+            dialog.set_ranges(canvas.axis_range("x"), canvas.axis_range("y"), z)
 
     def set_linear_input(self, on: bool) -> None:
         """Edit expressions as plain text instead of typeset maths; remembered."""
@@ -597,6 +728,7 @@ class MainWindow:
         self.menu_bar.style = ft.MenuStyle(
             bgcolor=current.panel, elevation=0, shadow_color="#00000000"
         )
+        self.keypad.apply_theme()
         self.status_bar.bgcolor = current.window
         self.status_bar.border = ft.Border(top=hairline)
         for text in (self.status, self.coords):
@@ -674,7 +806,7 @@ class MainWindow:
     def _on_splitter_drag(self, event: ft.DragUpdateEvent[ft.GestureDetector]) -> None:
         delta = event.primary_delta or 0.0
         width = float(self.panel.control.width or 340) + delta
-        self.panel.control.width = max(PANEL_MIN, min(PANEL_MAX, width))
+        self.panel.control.width = self._panel_width = max(PANEL_MIN, min(PANEL_MAX, width))
         runtime.push(self.panel.control)
 
     # -- files ---------------------------------------------------------------------------
@@ -728,8 +860,10 @@ class MainWindow:
         return True
 
     def save_file(self, then: Callable[[], object] | None = None) -> bool:
-        """Save to the current path (asking for one first if there is none)."""
-        if self.path is None:
+        """Save to the current path (asking for one first if there is none). Where the
+        client's file chooser does the saving, there is always something to choose: an
+        opened file's path is only a temporary copy on Android and iOS."""
+        if self.path is None or dialogs.host.saves_through_client:
             self.save_file_as(then)
             return False
         try:
@@ -745,6 +879,19 @@ class MainWindow:
 
     def save_file_as(self, then: Callable[[], object] | None = None) -> None:
         start = self.path or self._last_dir() / "graph.ograph.json"
+        if dialogs.host.saves_through_client:
+
+            def saved(path: Path | None) -> None:
+                self.path = path or self.path
+                self.controller.mark_saved()
+                self.show_message(f"Saved {(path or start).name}", 4000)
+                self._update_title()
+                if then is not None:
+                    then()
+
+            data = self.controller.document_data()
+            dialogs.save_bytes("Save Graph", start.name, data, saved)
+            return
 
         def chosen(path: Path) -> None:
             self.path = path
@@ -754,18 +901,32 @@ class MainWindow:
         dialogs.ask_save_path("Save Graph", start, FILE_EXTENSIONS, chosen)
 
     def export_image(self) -> None:
+        if dialogs.host.saves_through_client:
+
+            def exported(path: Path | None) -> None:
+                self.show_message(f"Exported {(path or Path('graph.png')).name}", 4000)
+
+            async def hand_over() -> None:
+                dialogs.save_bytes("Export Image", "graph.png", await self.capture(), exported)
+
+            self._when_rendered(lambda: runtime.spawn(hand_over))
+            return
         dialogs.ask_save_path(
             "Export Image", self._last_dir() / "graph.png", ["png", "jpg"], self.export_to
         )
 
     def export_to(self, path: Path) -> None:
         """Save the graph as an image once its visible geometry has loaded."""
+        self._when_rendered(lambda: runtime.spawn(lambda: self._write_image(path)))
+
+    def _when_rendered(self, then: Callable[[], object]) -> None:
+        """Run ``then`` once the graph's visible geometry has loaded."""
 
         def save() -> None:
             if self.canvas.is_rendering:
                 return
             self.canvas.rendering_finished.disconnect(save)
-            runtime.spawn(lambda: self._write_image(path))
+            then()
 
         self.canvas.rendering_finished.connect(save)
         if self.canvas.is_rendering:
@@ -809,8 +970,8 @@ class MainWindow:
                     ],
                     scroll=ft.ScrollMode.AUTO,
                 ),
-                width=680,
-                height=720,
+                width=min(680, self._size[0] - 40) if self._size[0] else 680,
+                height=min(720, self._size[1] - 150) if self._size[1] else 720,
             ),
         )
         dialog.actions = [ft.TextButton("Close", on_click=lambda _: dialogs.host.close(dialog))]
@@ -819,14 +980,51 @@ class MainWindow:
     def show_about(self) -> None:
         dialogs.message(
             "About OpenGraph",
-            f"OpenGraph {__version__}\n\nA desktop graphing calculator built with Flet, "
-            "NumPy and SymPy.",
+            f"OpenGraph {__version__}\n\nA graphing calculator built with Flet, NumPy and SymPy.",
         )
 
     # -- lifecycle ---------------------------------------------------------------------------
     def close(self) -> None:
         """Quit, after offering to save unsaved changes."""
         self._confirm_discard(self._quit)
+
+    # -- the app's life on a phone ---------------------------------------------------------
+    def on_lifecycle(self, state: ft.AppLifecycleState) -> None:
+        """Android and iOS may end a backgrounded app without notice: keep the work."""
+        if runtime.device.native_mobile and state in (
+            ft.AppLifecycleState.HIDE,
+            ft.AppLifecycleState.INACTIVE,
+            ft.AppLifecycleState.PAUSE,
+            ft.AppLifecycleState.DETACH,
+        ):
+            self.autosave()
+
+    def autosave(self) -> None:
+        path = config_dir() / AUTOSAVE_NAME
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = self.controller.document_data()
+            path.with_suffix(".tmp").write_bytes(data)
+            path.with_suffix(".tmp").replace(path)  # never a half-written file
+        except OSError:
+            log.exception("Could not keep the current graph")
+            return
+        self.preferences.set("autosaveModified", self.controller.modified)
+
+    def restore_autosave(self) -> bool:
+        """Continue where the app left off, if there is anything to continue."""
+        path = config_dir() / AUTOSAVE_NAME
+        if not path.exists():
+            return False
+        try:
+            self.controller.open_document(path)
+        except (OSError, DocumentError):
+            log.exception("Could not restore the last graph")
+            return False
+        if self.preferences.get_bool("autosaveModified", False):
+            self.controller.mark_modified()
+        self._update_title()
+        return True
 
     def _quit(self) -> None:
         self.shutdown()

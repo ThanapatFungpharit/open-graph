@@ -1,0 +1,18 @@
+name: Mobile build
+
+# Run by hand from the Actions tab: a build takes a long time, and downloads Flutter.
+on:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run --with flet-cli flet build apk --yes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opengraph-android
+          path: build/apk

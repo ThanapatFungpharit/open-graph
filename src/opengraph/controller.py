@@ -57,7 +57,7 @@ from opengraph.graph.background import LatestTask
 from opengraph.graph.canvas import GraphCanvas, Layer
 from opengraph.graph.settings import GraphSettings
 from opengraph.tasks import TaskManager
-from opengraph.ui import theme
+from opengraph.ui import runtime, theme
 from opengraph.ui.expression_panel import CURVE_OPERATIONS, ExpressionPanel
 from opengraph.ui.theme import Theme
 
@@ -164,6 +164,7 @@ class Controller:
             viewport.restore(document.view)
         else:
             viewport.reset()
+        self.canvas.view3d.restore(document.view)
         self.canvas.set_settings(settings)
         self.settings_changed.emit(settings)
         self.recompile()
@@ -203,15 +204,27 @@ class Controller:
 
     def new_document(self) -> None:
         self.set_document(Document())
-        self.panel.focus_row(self.document.items[0].id)
+        if not runtime.device.touch:  # focusing would pop up the soft keyboard
+            self.panel.focus_row(self.document.items[0].id)
 
     def open_document(self, path: str | Path) -> None:
         self.set_document(Document.load(path))  # raises DocumentError
 
     def save_document(self, path: str | Path) -> None:
-        self.document.view = self.canvas.viewport.state()
+        self.document_data()
         self.document.save(path)
         self._set_modified(False)
+
+    def document_data(self) -> bytes:
+        """The document as the bytes of a file, with the current view."""
+        self.document.view = self.canvas.view_state()
+        return self.document.to_json().encode("utf-8")
+
+    def mark_saved(self) -> None:
+        self._set_modified(False)
+
+    def mark_modified(self) -> None:
+        self._set_modified(True)
 
     # -- expressions ------------------------------------------------------------------
     def add_expression(

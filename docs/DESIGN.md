@@ -41,6 +41,12 @@ precedence as pasted text.
   `ViewRect` with `bits > 0` has bounds that are offsets from an exact origin; plots
   then sample through `precise.py` and return geometry relative to that origin.
 
+* `meshing.py`: surfaces and space curves, as triangles and segments cut to a `Box`:
+  height fields (domain edges by bisection; an edge is a jump if half of it holds nearly
+  all of the change) and marching tetrahedra (a pole is a sign change where the function
+  grows). Plots in space implement `sample_space(box)`; `space_geometry` lays flat plots
+  in the plane z = 0, which is how a row keeps its meaning in a 3D view.
+
 ## Native kernels
 
 `native/_kernels.pyx` (segment chaining, Douglas–Peucker, screen placement) and
@@ -87,9 +93,32 @@ offsets from it, and tiles have exact origins (multiples of the tile size). Tick
 exact multiples of their decimal step, and labels and traced coordinates are formatted
 from exact values. Points of interest and point dragging are off at that depth.
 
+3D view: Flet's canvas can't fill thousands of triangles quickly, and sorting whole
+triangles can't draw intersecting surfaces. So `graph/raster.py` computes each frame per
+pixel: a software z-buffer in NumPy, shown as one image with text labels drawn over it. It
+stays in NumPy because every operation is batched: the candidate pixels of a batch of
+triangles are generated at once, `np.maximum.at` resolves depth, and only the winning
+fragments are shaded. `graph/view3d.py` holds the state, and two background tasks. Sampling
+makes meshes for the current box, so turning the view reuses them. Drawing makes quick
+frames while the view moves, and one supersampled frame once it rests; export waits for
+that one. A drag lets a running frame finish (`LatestTask(finish_active=True)`), or a stream
+of moves would cancel every frame before it ended. The previous image stays under the new
+one, since the client decodes images asynchronously. Lighting and surface grid lines work
+in the box's normalized space and in screen space, so they don't depend on axis ranges.
+
 The controller compiles debounced edits on a single compile thread (`LatestTask`),
 applying a result only if the document's revision is unchanged; `flush()` and the
 other synchronous paths compile on the interface thread as before.
+
+Phones and tablets: `ui/runtime.device` says what the interface runs on, set once at
+startup, and controls choose their gestures from it when they are built. Soft keyboards
+report no Backspace and no arrows, so the editor's hidden field stays full of zero-width
+characters for the keyboard to delete, and `ui/keypad.py` has the missing keys. Layout
+follows the window's width and not the device. `OPENGRAPH_NO_GMPY2` and
+`OPENGRAPH_THREAD_WORKERS` select what Android and iOS use, and CI runs the whole test
+suite on them. `engine/multiprecision.py` chooses gmpy2 or `engine/mpfr_fallback.py`, which
+works on mpmath's `libmp` rather than `mpmath.mp` because `mp`'s precision is one global,
+and deep-zoom tiles are computed in parallel at different precisions.
 
 The panel emits intents. The controller changes the document, compiles it and sends
 plot layers and feedback to the UI. The canvas consumes plots, never source text.

@@ -56,12 +56,18 @@ class LatestTask:
         self._pending: tuple[object, Callable[[], object]] | None = None
         self._lifetime = Event()
 
-    def request(self, key: object, fn: Callable[[], object]) -> None:
+    def request(
+        self, key: object, fn: Callable[[], object], *, finish_active: bool = False
+    ) -> None:
+        """Replace what is to be calculated. With ``finish_active`` a calculation already
+        running still reports its result first, so a stream of requests can't cancel each
+        one before it ends (a drag shows the frames that were ready in time)."""
         if self._lifetime.is_set():
             return
         if self._active is not None and self._active.key == key and not self._active.obsolete():
             return
-        self.cancel()
+        if not finish_active:
+            self.cancel()
         self._pending = key, fn
         self._pump()
 

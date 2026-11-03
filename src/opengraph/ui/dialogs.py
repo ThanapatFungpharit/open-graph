@@ -24,6 +24,13 @@ class DialogHost:
         self.shown: list[ft.DialogControl] = []  # open dialogs, oldest first
         self.files: ft.FilePicker | None = None  # set by the application
 
+    @property
+    def saves_through_client(self) -> bool:
+        """Whether saving hands data to the client's file chooser, instead of getting a
+        path that this process could write to (a browser, Android and iOS)."""
+        page = self.page
+        return page is not None and (page.web or runtime.device.native_mobile)
+
     def show(self, dialog: ft.DialogControl) -> None:
         self.shown.append(dialog)
         if self.page is not None:
@@ -166,11 +173,13 @@ def ask_open_path(
         return
 
     async def run() -> None:
+        filtered = bool(extensions) and not runtime.device.touch
         files = await picker.pick_files(
             dialog_title=title,
             initial_directory=str(initial),
-            file_type=ft.FilePickerFileType.CUSTOM if extensions else ft.FilePickerFileType.ANY,
-            allowed_extensions=list(extensions) or None,
+            # Android and iOS filter by file types that .ograph.json isn't registered as.
+            file_type=ft.FilePickerFileType.CUSTOM if filtered else ft.FilePickerFileType.ANY,
+            allowed_extensions=list(extensions) if filtered else None,
         )
         if files and files[0].path:
             on_path(Path(files[0].path))
@@ -196,5 +205,27 @@ def ask_save_path(
         )
         if path:
             on_path(Path(path))
+
+    runtime.spawn(run)
+
+
+def save_bytes(
+    title: str,
+    name: str,
+    data: bytes,
+    on_saved: Callable[[Path | None], object],
+) -> None:
+    """Let the client's file chooser save ``data``; ``on_saved`` is called if it did, with
+    the path if the client tells it (a browser doesn't, and can't report a cancel either)."""
+    picker = _file_picker()
+    if picker is None:
+        return
+
+    async def run() -> None:
+        path = await picker.save_file(dialog_title=title, file_name=name, src_bytes=data)
+        if path:
+            on_saved(Path(path))
+        elif host.page is not None and host.page.web:
+            on_saved(None)
 
     runtime.spawn(run)

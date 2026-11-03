@@ -8,10 +8,12 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "flet[desktop]>=1.0.4",
+    "flet>=1.0.4",
+    "flet-desktop>=1.0.4; sys_platform != 'android' and sys_platform != 'ios'",
     "fonttools>=4.60",
-    "gmpy2>=2.3.2",
-    "numpy>=2.5.4",
+    # No wheels for Android and iOS, where mpmath stands in for it (engine/mpfr_fallback.py).
+    "gmpy2>=2.3.2; sys_platform != 'android' and sys_platform != 'ios'",
+    "numpy>=2.4.6",  # the newest in Flet's index of wheels for Android and iOS
     "pillow>=11.0",
     "sympy>=1.14.0",
 ]
@@ -26,6 +28,16 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["opengraph*"]
+
+# The Android and iOS apps: flet build apk, flet build ipa (see the README).
+[tool.flet]
+org = "io.github.thanapatfungpharit"
+product = "OpenGraph"
+
+[tool.flet.app]
+path = "src"
+module = "main"
 
 [tool.setuptools.package-data]
 opengraph = ["ui/assets/fonts/*"]

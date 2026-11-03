@@ -10,6 +10,10 @@ method; the canvas only consumes ``Geometry``. Sampling happens in *axis* coordi
 (log10 on a logarithmic axis, see :class:`~opengraph.engine.sampling.ViewRect`) and the
 geometry is returned in world coordinates.
 
+Plots in space implement ``sample_space`` instead, which returns :class:`SpaceGeometry`
+for a :class:`~opengraph.engine.meshing.Box`. A 3D view shows flat plots too: see
+:func:`space_geometry`, which lays their geometry in the plane z = 0.
+
 A deep-zoom view (``view.bits > 0``) has bounds that are offsets from an exact origin.
 Plots then evaluate ``f(origin + offset)`` in MPFR (:mod:`~opengraph.engine.precise`)
 and return geometry as offsets from the same origin; complex-mode expressions, which
@@ -23,7 +27,6 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-import gmpy2
 import numpy as np
 from numpy.typing import NDArray
 
@@ -31,6 +34,16 @@ from opengraph.engine import precise
 from opengraph.engine.ast import BinOp, Const, FuncCall, Guard, Node, Num, UnaryOp, Var
 from opengraph.engine.builtins import Array
 from opengraph.engine.evaluator import NumericFunction
+from opengraph.engine.meshing import (
+    Box,
+    Mesh,
+    clip_segments,
+    curve_segments,
+    height_field,
+    implicit_surface,
+    mesh_from,
+)
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.sampling import (
     FillMask,
     ViewRect,
@@ -43,6 +56,9 @@ from opengraph.engine.sampling import (
 )
 
 POLAR_THETA_MAX = 12 * math.pi  # like Desmos: long enough for spirals and rose curves
+SURFACE_CELLS = 72  # grid cells along each side of a surface z = f(x, y)
+IMPLICIT_CELLS = 40  # grid cells along each side of the box for an implicit surface
+FLAT_VIEW_PX = 1024  # the resolution flat curves are sampled at in a 3D view
 
 
 def shifted(
@@ -436,6 +452,147 @@ class PlotGroup:
         return Geometry.merge([plot.sample(view) for plot in self.plots])
 
 
+@dataclass(frozen=True, slots=True)
+class SpaceGeometry:
+    """World-coordinate primitives to draw in a 3D view."""
+
+    mesh: Mesh | None = None
+    segments: Array | None = None  # (M, 2, 3) independent line segments
+    points: Array | None = None  # (K, 3)
+
+    @property
+    def is_empty(self) -> bool:
+        return (
+            (self.mesh is None or self.mesh.is_empty)
+            and (self.segments is None or len(self.segments) == 0)
+            and (self.points is None or len(self.points) == 0)
+        )
+
+
+class _InSpace:
+    """A plot that draws only in a 3D view; the plane has nothing to show of it."""
+
+    def sample(self, view: ViewRect) -> Geometry:
+        return Geometry()
+
+
+@dataclass(frozen=True, eq=True)
+class SurfacePlot(_InSpace):
+    """``z = f(x, y)``, or ``x`` or ``y`` as a function of the other two coordinates."""
+
+    node: Node
+    dependent: str = "z"
+    fn: NumericFunction = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fn", NumericFunction(self.node))
+
+    @property
+    def axes(self) -> tuple[int, int, int]:
+        """The axes of the function's two inputs, then of its value."""
+        return {"z": (0, 1, 2), "y": (0, 2, 1), "x": (1, 2, 0)}[self.dependent]
+
+    def sample_space(self, box: Box) -> SpaceGeometry:
+        u, v, w = self.axes
+        names = "xyz"
+
+        def evaluate(a: Array, b: Array) -> Array:
+            return self.fn(**{names[u]: a, names[v]: b})
+
+        points, triangles = height_field(
+            evaluate, box.range(u), box.range(v), box.range(w), SURFACE_CELLS
+        )
+        world = np.empty_like(points)
+        world[:, [u, v, w]] = points
+        return SpaceGeometry(mesh=mesh_from(world, triangles, box))
+
+
+@dataclass(frozen=True, eq=True)
+class ImplicitSurfacePlot(_InSpace):
+    """The zero set of ``F(x, y, z)``; built from an equation ``lhs = rhs`` as lhs - rhs."""
+
+    node: Node
+    fn: NumericFunction = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        normalized = _zero_form(self.node)
+        if normalized != self.node:
+            normalized = Guard(normalized, self.node)
+        object.__setattr__(self, "fn", NumericFunction(normalized))
+
+    def sample_space(self, box: Box) -> SpaceGeometry:
+        def evaluate(x: Array, y: Array, z: Array) -> Array:
+            return self.fn(x=x, y=y, z=z)
+
+        points, triangles = implicit_surface(evaluate, box, IMPLICIT_CELLS)
+        return SpaceGeometry(mesh=mesh_from(points, triangles, box))
+
+
+@dataclass(frozen=True, eq=True)
+class SpaceCurvePlot(_InSpace):
+    """``(x(t), y(t), z(t))`` for ``t`` in ``[t_min, t_max]``."""
+
+    x_node: Node
+    y_node: Node
+    z_node: Node
+    t_min: float = 0.0
+    t_max: float = 1.0
+    complex_mode: bool = False
+    functions: tuple[NumericFunction, ...] = field(init=False, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        nodes = (self.x_node, self.y_node, self.z_node)
+        object.__setattr__(
+            self, "functions", tuple(NumericFunction(n, self.complex_mode) for n in nodes)
+        )
+
+    def xyz(self, t: Array) -> Array:
+        return np.column_stack([np.broadcast_to(f(t=t), t.shape) for f in self.functions])
+
+    def sample_space(self, box: Box) -> SpaceGeometry:
+        return SpaceGeometry(segments=curve_segments(self.xyz, self.t_min, self.t_max, box))
+
+
+@dataclass(frozen=True, eq=True)
+class SpacePointPlot(_InSpace):
+    x: float
+    y: float
+    z: float
+
+    def sample_space(self, box: Box) -> SpaceGeometry:
+        return SpaceGeometry(points=_points_inside(np.array([[self.x, self.y, self.z]]), box))
+
+
+@dataclass(frozen=True, eq=True)
+class SpacePointSetPlot(_InSpace):
+    """Several points in space; ``lines`` joins consecutive ones (NaN breaks a line)."""
+
+    points: tuple[tuple[float, float, float], ...]
+    markers: bool = True
+    lines: bool = False
+
+    def array(self) -> Array:
+        return np.array(self.points, dtype=np.float64).reshape(-1, 3)
+
+    def sample_space(self, box: Box) -> SpaceGeometry:
+        data = self.array()
+        segments = None
+        if self.lines and len(data) > 1:
+            pairs = np.stack([data[:-1], data[1:]], axis=1)
+            segments = clip_segments(pairs[np.isfinite(pairs).all(axis=(1, 2))], box)
+        return SpaceGeometry(
+            segments=segments, points=_points_inside(data, box) if self.markers else None
+        )
+
+
+def _points_inside(points: Array, box: Box) -> Array:
+    with np.errstate(invalid="ignore"):
+        inside = ((points >= box.lows) & (points <= box.highs)).all(axis=1)
+    return points[inside]
+
+
+SpacePlot = SurfacePlot | ImplicitSurfacePlot | SpaceCurvePlot | SpacePointPlot | SpacePointSetPlot
+
 Plot = (
     ExplicitPlot
     | ImplicitPlot
@@ -445,6 +602,7 @@ Plot = (
     | PointPlot
     | PointSetPlot
     | PlotGroup
+    | SpacePlot
 )
 
 
@@ -455,3 +613,39 @@ def members(plot: Plot) -> Iterator[Plot]:
             yield from members(member)
     else:
         yield plot
+
+
+def is_spatial(plot: Plot) -> bool:
+    """Whether drawing ``plot`` takes a 3D view."""
+    return any(isinstance(member, SpacePlot) for member in members(plot))
+
+
+def _flat_segments(geometry: Geometry, box: Box) -> Array | None:
+    """The lines of flat geometry as segments in the plane z = 0, cut to ``box``."""
+    parts = [] if geometry.segments is None else [geometry.segments]
+    parts += [np.column_stack((line[:-1], line[1:])) for line in geometry.polylines]
+    if not parts:
+        return None
+    flat = np.vstack(parts)
+    flat = flat[np.isfinite(flat).all(axis=1)]
+    zeros = np.zeros(len(flat))
+    start = np.column_stack((flat[:, 0], flat[:, 1], zeros))
+    end = np.column_stack((flat[:, 2], flat[:, 3], zeros))
+    return clip_segments(np.stack((start, end), axis=1), box)
+
+
+def space_geometry(plot: Plot, box: Box) -> SpaceGeometry:
+    """What ``plot`` (not a group) draws in the 3D view ``box``. Rows keep their meaning
+    in a 3D view: flat plots stay flat, in the plane z = 0, without any shading."""
+    if isinstance(plot, SpacePlot):
+        return plot.sample_space(box)
+    if not box.z_min <= 0 <= box.z_max:
+        return SpaceGeometry()
+    assert not isinstance(plot, PlotGroup)
+    view = ViewRect(box.x_min, box.x_max, box.y_min, box.y_max, FLAT_VIEW_PX, FLAT_VIEW_PX)
+    geometry = plot.sample(view)
+    points = None
+    if geometry.points is not None and len(geometry.points):
+        finite = geometry.points[np.isfinite(geometry.points).all(axis=1)]
+        points = _points_inside(np.column_stack((finite, np.zeros(len(finite)))), box)
+    return SpaceGeometry(segments=_flat_segments(geometry, box), points=points)

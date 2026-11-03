@@ -28,28 +28,39 @@ def build(page: ft.Page, document: Path | None = None) -> MainWindow:
     dialogs.host.page = page
     dialogs.host.files = ft.FilePicker()
     theme.set_system_dark(page.platform_brightness == ft.Brightness.DARK)
+    touch = page.platform is not None and page.platform.is_mobile()
+    runtime.device.touch = touch
+    runtime.device.native_mobile = touch and not page.web
 
     window = MainWindow(page)
-    width = window.preferences.get_float("windowWidth") or DEFAULT_SIZE[0]
-    height = window.preferences.get_float("windowHeight") or DEFAULT_SIZE[1]
-    page.window.width, page.window.height = width, height
-    page.window.min_width, page.window.min_height = 640, 420
-    page.window.prevent_close = True
+    if not runtime.device.native_mobile:
+        width = window.preferences.get_float("windowWidth") or DEFAULT_SIZE[0]
+        height = window.preferences.get_float("windowHeight") or DEFAULT_SIZE[1]
+        page.window.width, page.window.height = width, height
+        page.window.min_width, page.window.min_height = 640, 420
+        page.window.prevent_close = True
 
-    def on_window_event(event: ft.WindowEvent[ft.Window]) -> None:
-        if event.type == ft.WindowEventType.CLOSE:
-            window.close()
+        def on_window_event(event: ft.WindowEvent[ft.Window]) -> None:
+            if event.type == ft.WindowEventType.CLOSE:
+                window.close()
 
-    page.window.on_event = on_window_event
+        page.window.on_event = on_window_event
     page.on_keyboard_event = window.on_key
+    page.on_resize = lambda event: window.resize(event.width, event.height)
+    page.on_app_lifecycle_state_change = lambda event: window.on_lifecycle(event.state)
     page.on_platform_brightness_change = lambda _: window.on_brightness_changed(
         page.platform_brightness == ft.Brightness.DARK
     )
-    page.add(window.control)
+    if page.width and page.height:
+        window.resize(page.width, page.height)
+    page.add(ft.SafeArea(window.control, expand=True))  # clear of notches and system bars
     window.apply_theme(window.theme_mode)
     if document is not None:
         window.open_path(document)
-    window.panel.focus_row(window.controller.document.items[0].id)
+    elif runtime.device.native_mobile:
+        window.restore_autosave()
+    if not touch:  # focusing would pop up the soft keyboard
+        window.panel.focus_row(window.controller.document.items[0].id)
     page.update()
     return window
 

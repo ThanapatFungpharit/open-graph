@@ -79,6 +79,36 @@ Constant sub-expressions are folded once, in 256-bit arithmetic, and rounded onc
 `sum(1/k^2 for k from 1 to 100000)` is correctly rounded. With gmpy2 installed, SymPy
 and mpmath also use GMP for exact integers, rationals and arbitrary precision.
 
+## Phones and tablets
+
+The same application runs as an Android or iOS app. [Flet](https://flet.dev) builds them;
+the first build downloads Flutter and, for Android, its SDK. iOS needs a Mac with Xcode.
+
+```bash
+uv run --with flet-cli flet build apk   # Android: an installable package in build/apk
+uv run --with flet-cli flet build ipa   # iOS: needs a signing identity
+```
+
+`[tool.flet]` in `pyproject.toml` holds the app's name and identifier. The Actions workflow
+**Mobile build** builds the Android package on demand.
+
+On a touch screen one finger pans the graph (or turns a 3D view), and two fingers pinch to
+zoom and move it. Tap, or press and hold and slide, to read coordinates. Below 720 pixels
+wide the graph goes above the expressions, with a handle to divide the space between them.
+A row of keys above the keyboard has what soft keyboards lack: arrow keys to move through
+exponents and fractions, `^`, `/`, brackets, `√`, `π` and `θ`. Press and hold an expression
+for undo, copy and paste. The file chooser does the saving, so Save always asks where. The
+current graph is kept when the app goes to the background and is back on the next launch.
+
+Three things differ from the desktop:
+
+* Android and iOS have no gmpy2, so exact arithmetic and deep zoom run on mpmath, which
+  gives the same results more slowly. The Cython kernels aren't built either.
+* Apps can't start processes, so symbolic work runs on a thread. The interface may stutter
+  during long computations, and Cancel only drops a task's result: it can't stop one that
+  would never finish, and that keeps using the processor until the app closes.
+* Opening a graph by a file passed on the command line is for desktops only.
+
 ## Predictable expression syntax
 
 | Purpose | Example |
@@ -87,6 +117,9 @@ and mpmath also use GMP for exact integers, rationals and arbitrary precision.
 | Implicit curve | `x^2 + y^2 = 1` |
 | Inequality | `y < x^2`, `x + y >= 1`, `1 < x <= 3` |
 | Polar curve | `r = 1 + cos(theta)` |
+| Surface | `z = x^2 - y^2`, `x = y z`, `x + y + z = 1` |
+| Implicit surface | `x^2 + y^2 + z^2 = 9` |
+| Point/curve in space | `point[1, 2, 3]`, `parametric(cos(u), sin(u), u for u in [0, 6pi])` |
 | Definition | `a = 2`, `f(t) = t^2`, `g(u, v) = u + v` |
 | Restricted curve | `plot(t^2 for t in (0, 2])` |
 | Parametric curve | `parametric(cos(u), sin(u) for u in [0, 2pi])` |
@@ -221,6 +254,51 @@ A constant assignment such as `r = 1` defines a reusable variable on every grid.
 Use `x^2 + y^2 = r^2` for a circle with that radius. Assignments to `r`
 that use `theta` describe polar curves; `theta` remains a reserved coordinate. Changing
 the displayed grid does not change the meaning of a row.
+
+## 3D graphs
+
+Any equation that uses `z` is a surface, and a point or curve with a third coordinate
+lies in space. While such a row is visible, the graph is a 3D view; hide or delete the
+last one and it returns to the plane, which keeps its own position.
+
+```text
+z = sin(x) cos(y)
+x^2 + y^2 + z^2 = 9
+y = z^2
+z = list[1, 2, 3] x
+point[1, 2, 3]
+parametric(4cos(u), 4sin(u), u/2 for u in [0, 6pi])
+t = [0, 6pi]
+point[cos(t), sin(t), t]
+```
+
+Three list columns of a table plot as points in space with `point[x_1, y_1, z_1]`.
+
+**`z` is a coordinate, like `x` and `y`.** It is reserved everywhere, also in Complex
+Mode, so `z = 5` is a plane rather than a definition with a slider; pick another name
+for a value. Function parameters and bound variables may still be called z, as in
+`f(z) = z^2`. A function of two names, such as `g(u, v) = u v`, draws nothing until a
+row like `z = g(x, y)` uses it.
+
+**Rows keep their meaning in a 3D view.** A row without z stays flat: `y = x^2` is a
+curve in the plane z = 0, not a sheet above it, and `x = 3` is a line. Write `x = 3 + 0 z`
+for the plane. Inequalities show their boundary there, without shading.
+
+Drag to turn the view, and Shift+drag to pan. The wheel zooms, Ctrl+wheel only x and y,
+and Shift+wheel only z (the last two need an unlocked aspect ratio). Arrow keys turn the
+view, and Ctrl+0 resets it. The box is always drawn as a cube, so stretching one axis
+shows the shape with a different scale on that axis. Graph Settings has all three ranges.
+Hover over a surface, curve or point to read a point on it. The view is saved with the
+document.
+
+Surfaces are sampled on a grid: 72 cells a side for `z = f(x, y)`, and 40 for implicit
+surfaces by marching tetrahedra. So, as with implicit curves, features smaller than a
+cell can be missed; zoom in to see them. Surfaces follow the edge of their domain,
+and jumps and poles leave a gap rather than a false wall.
+
+Not available in 3D: inequalities using z, surfaces given by two parameters, continuous
+families such as `z = [0, 1) x`, logarithmic axes, deep zoom, points of interest, and
+dragging points. Intersecting surfaces are drawn correctly but are always opaque.
 
 ## Algebra and calculus
 

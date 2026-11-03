@@ -418,7 +418,7 @@ SYMBOLIC_CONSTANTS: dict[str, Callable[[Any], Any]] = {
     IMAGINARY_UNIT: lambda sp: sp.I,
 }
 
-PLOT_VARIABLES = ("x", "y")
+PLOT_VARIABLES = ("x", "y", "z")
 
 KEYWORDS = frozenset(
     {

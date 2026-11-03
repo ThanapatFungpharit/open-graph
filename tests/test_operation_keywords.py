@@ -56,7 +56,7 @@ def test_keyword_forms_compute() -> None:
         ("sum(k^2 for k in [1, 2])", "sum has no 'in' part; write sum(k^2 for k from 1 to 10)"),
         ("limit(1/x for x to 0 from up)", "limit: write 'from left' or 'from right'"),
         ("sum(k^2 for k from 1 from 2 to 3)", "'from' is given twice"),
-        ("parametric(cos(u) for u in [0, 1])", "parametric takes 2 expressions before 'for'"),
+        ("parametric(cos(u) for u in [0, 1])", "parametric takes 2 or 3 expressions before 'for'"),
         ("sum(k^2 for k from 1 to 10) to", "Unknown name 'to'"),  # a name outside `(…)`
     ],
 )

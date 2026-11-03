@@ -30,7 +30,6 @@ from functools import partial
 from sys import float_info
 from threading import Event
 
-import gmpy2
 import numpy as np
 from numpy.typing import NDArray
 
@@ -38,6 +37,7 @@ from opengraph import events, native
 from opengraph.engine import precise
 from opengraph.engine.builtins import Array
 from opengraph.engine.cancellation import Cancelled, cancellable, checkpoint
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.plots import ExplicitPlot, Geometry, ImplicitPlot, Plot, RegionPlot, members
 from opengraph.engine.sampling import FillMask, ViewRect, from_axis, to_axis
 

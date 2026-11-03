@@ -27,5 +27,11 @@ jobs:
         run: uv run pytest
         env:
           OPENGRAPH_PURE_PYTHON: "1"
+      - name: What Android and iOS run on (mpmath for gmpy2, threads for processes)
+        run: uv run pytest
+        env:
+          OPENGRAPH_PURE_PYTHON: "1"
+          OPENGRAPH_NO_GMPY2: "1"
+          OPENGRAPH_THREAD_WORKERS: "1"
       - run: uv run ruff check src tests setup.py
       - run: uv run mypy

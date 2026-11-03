@@ -388,8 +388,11 @@ class Document:
         doc.settings = GraphSettings.from_dict(data.get("settings"))
         return doc
 
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        Path(path).write_text(self.to_json(), encoding="utf-8")
 
     @classmethod
     def load(cls, path: str | Path) -> Document:

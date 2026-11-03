@@ -28,6 +28,7 @@ def _isolated_state(
     runtime.clipboard.service = None
     runtime.modifiers.ctrl = runtime.modifiers.shift = False
     runtime.modifiers.alt = runtime.modifiers.meta = False
+    runtime.device.touch = runtime.device.native_mobile = False
     runtime.focus_tracker.owner = None
     widget._focused = None
     dialogs.host.page = None

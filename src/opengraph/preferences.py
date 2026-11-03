@@ -24,6 +24,9 @@ def config_dir() -> Path:
     override = os.environ.get("OPENGRAPH_CONFIG_DIR")
     if override:
         return Path(override)
+    app_data = os.environ.get("FLET_APP_STORAGE_DATA")  # set in the Android and iOS apps
+    if app_data:
+        return Path(app_data)
     if sys.platform == "win32":
         return Path(os.environ.get("APPDATA") or Path.home()) / "OpenGraph"
     if sys.platform == "darwin":

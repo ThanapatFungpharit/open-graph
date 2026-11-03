@@ -23,6 +23,7 @@ predictability issues. Document migration was intentionally excluded.
 | Squared implicit zero sets disappear | Normalize recognizable outer powers/factors and preserve the original domain |
 | Rearranged formulas become errors | Insert valid symbolic-only `formula` display rows |
 | Symbolic operations require numeric assignments | Standalone algebra, derivatives, limits and Taylor rows accept free symbols without defining them |
+| 3D graphs need a third coordinate | `z` is reserved like x and y, in every mode. A row is 3D only if it says so (uses z, or has three coordinates); flat rows stay flat in the plane z = 0 of a 3D view |
 | Rational algebra lacks explicit result forms | `cancel`, `together`, `apart`, `collect` and `trigsimp` preserve original domains and compose through the CAS cache |
 
 Limits remain numerical: general contour completeness is not decidable from a pixel

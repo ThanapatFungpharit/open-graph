@@ -1,5 +1,10 @@
 """Background symbolic tasks, run in worker processes so they can be cancelled.
 
+Android and iOS don't let an application start processes. There each lane runs its tasks
+on a thread instead (:class:`_ThreadLane`), which still keeps the interface responsive.
+A thread can't be killed, so cancelling only abandons the task: its result is dropped,
+and the computation holds on to some CPU time until it ends.
+
 Each *lane* is a FIFO queue served by one long-lived child process
 (``python -m opengraph.engine.worker``), started on first use. A lane runs one task at a
 time; the others wait their turn. Cancelling a queued task just drops it; cancelling the
@@ -31,6 +36,11 @@ from opengraph.engine.compiler import CasRequest, SymbolicTarget
 from opengraph.engine.errors import MathError
 
 HISTORY_LIMIT = 100  # finished tasks kept for the Tasks window
+
+
+def _uses_threads() -> bool:
+    """Whether tasks run on threads, as they must where processes aren't allowed."""
+    return bool(os.environ.get("OPENGRAPH_THREAD_WORKERS")) or sys.platform in ("android", "ios")
 
 
 class TaskState(enum.Enum):
@@ -197,6 +207,41 @@ class _Lane:
         return task
 
 
+class _ThreadLane(_Lane):
+    """One queue, with each task on a thread of its own (see the module's documentation)."""
+
+    def dispatch(self) -> None:
+        if self.current is not None or not self.queue:
+            return
+        task = self.current = self.queue.popleft()
+        task.state, task.started = TaskState.RUNNING, time.monotonic()
+        threading.Thread(target=self._run, args=(task,), name="opengraph-task", daemon=True).start()
+        self.manager.changed.emit()
+
+    def _run(self, task: Task) -> None:
+        """Worker thread: compute, then report on the interface loop."""
+        events.post(partial(self._on_result, task, worker.run(task.operation, task.target)))
+
+    def _on_result(self, task: Task, outcome: tuple[bool, object]) -> None:
+        if task is not self.current:
+            return  # cancelled, or the application is closing
+        self.current = None
+        ok, payload = outcome
+        if ok:
+            self.manager._finish(task, TaskState.DONE, payload)
+        else:
+            task.detail = str(payload)
+            self.manager._finish(task, TaskState.FAILED, MathError(task.detail))
+        self.dispatch()
+
+    def kill_worker(self) -> None:
+        pass  # there is nothing to kill: the task's result is dropped when it comes
+
+    def cancel_current(self) -> Task | None:
+        task, self.current = self.current, None
+        return task
+
+
 def _close(process: subprocess.Popen[bytes]) -> None:
     for stream in (process.stdin, process.stdout):
         if stream is not None:
@@ -239,7 +284,9 @@ class TaskManager:
         self._next_id += 1
         self._tasks.append(task)
         self._trim_history()
-        queue = self._lanes.setdefault(lane, _Lane(self))
+        queue = self._lanes.get(lane)
+        if queue is None:
+            queue = self._lanes[lane] = _ThreadLane(self) if _uses_threads() else _Lane(self)
         queue.queue.append(task)
         self.changed.emit()
         queue.dispatch()
