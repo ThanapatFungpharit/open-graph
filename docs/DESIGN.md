@@ -125,7 +125,11 @@ plot layers and feedback to the UI. The canvas consumes plots, never source text
 Settings for angle units and number mode affect compilation; grid appearance does
 not. Polar coordinate names have fixed meaning on every grid.
 
-SymPy jobs run in cancellable worker processes managed by `tasks.py`. Content-keyed
+SymPy jobs run in cancellable worker processes managed by `tasks.py`. Android and iOS have
+no processes, so there each job has a thread, and cancelling raises `TaskCancelled` in it
+through `PyThreadState_SetAsyncExc`, repeatedly until it has stopped, since a few bare
+`except:` clauses in SymPy and mpmath can catch one. It derives from `BaseException` so
+handlers don't take it for a failed computation. Content-keyed
 requests prevent stale results from changing unrelated rows. Exact equation answers
 update feedback only. Solve for creates `formula(...)` rows that can represent free
 symbols without trying to evaluate or bind them.

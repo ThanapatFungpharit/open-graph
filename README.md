@@ -104,9 +104,10 @@ Three things differ from the desktop:
 
 * Android and iOS have no gmpy2, so exact arithmetic and deep zoom run on mpmath, which
   gives the same results more slowly. The Cython kernels aren't built either.
-* Apps can't start processes, so symbolic work runs on a thread. The interface may stutter
-  during long computations, and Cancel only drops a task's result: it can't stop one that
-  would never finish, and that keeps using the processor until the app closes.
+* Apps can't start processes, so symbolic work runs on a thread, and the interface may
+  stutter during long computations. Cancel stops a computation by raising an exception in
+  that thread, which works within moments unless one operation in C holds it up, such as
+  multiplying integers of millions of digits.
 * Opening a graph by a file passed on the command line is for desktops only.
 
 ## Predictable expression syntax
