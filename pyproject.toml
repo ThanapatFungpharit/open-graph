@@ -12,10 +12,12 @@ requires-python = ">=3.13"
 dependencies = [
     # Exact: flet build bundles this with the Flutter client of the same version.
     "flet==1.0.4",
-    "flet-desktop==1.0.4; sys_platform != 'android' and sys_platform != 'ios'",
+    # platform_system, not sys_platform: flet build runs pip on the build machine, and only
+    # makes platform.system() say Android or iOS.
+    "flet-desktop==1.0.4; platform_system != 'Android' and platform_system != 'iOS'",
     "fonttools>=4.60",
     # No wheels for Android and iOS, where mpmath stands in for it (engine/mpfr_fallback.py).
-    "gmpy2>=2.3.2; sys_platform != 'android' and sys_platform != 'ios'",
+    "gmpy2>=2.3.2; platform_system != 'Android' and platform_system != 'iOS'",
     "numpy>=2.4.6",  # the newest in Flet's index of wheels for Android and iOS
     "pillow>=11.0",
     "sympy>=1.14.0",

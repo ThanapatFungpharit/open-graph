@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from packaging.requirements import Requirement
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -79,6 +81,32 @@ def test_versions_that_cannot_be_a_version_code_are_refused(version: str) -> Non
 def test_this_project_passes() -> None:
     info = build_info.build_info(ROOT, "branch", "master", "abcdef1234")
     assert re.fullmatch(r"\d+\.\d+\.\d+-abcdef1", info["label"])
+
+
+@pytest.mark.parametrize("system", ["Android", "iOS"])
+def test_mobile_builds_leave_out_what_has_no_wheels_there(system: str) -> None:
+    """flet build runs pip on the build machine: sys_platform stays linux or darwin, and
+    only platform_system tells what the packages are for."""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))["project"]
+    environment = {"platform_system": system, "sys_platform": "linux"}
+    installed = {
+        requirement.name
+        for requirement in map(Requirement, project["dependencies"])
+        if requirement.marker is None or requirement.marker.evaluate(environment)
+    }
+    assert "gmpy2" not in installed and "flet-desktop" not in installed
+    assert {"flet", "numpy", "sympy"} <= installed
+
+
+def test_desktop_builds_keep_them() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))["project"]
+    environment = {"platform_system": "Linux", "sys_platform": "linux"}
+    installed = {
+        requirement.name
+        for requirement in map(Requirement, project["dependencies"])
+        if requirement.marker is None or requirement.marker.evaluate(environment)
+    }
+    assert {"gmpy2", "flet-desktop"} <= installed
 
 
 def test_the_workflow_builds_on_the_python_that_ci_tests() -> None:

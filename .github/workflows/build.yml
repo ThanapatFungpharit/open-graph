@@ -100,6 +100,9 @@ jobs:
             runner: macos-15-intel
           - architecture: arm64
             runner: macos-15
+    env:
+      # Flet's connectivity plugin needs the macOS 26 SDK, newer than the runner's default.
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v9.0.0
