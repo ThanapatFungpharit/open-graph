@@ -475,6 +475,18 @@ def _simplify(
     return _simplify_numpy(points, tolerance, starts)
 
 
+def _dot(a: Array, b: Array) -> Array:
+    """Row-wise dot products of (N, 2) arrays, each operation rounded on its own.
+
+    Not ``einsum``, which may fuse multiply and add into one operation that rounds
+    differently. On a symmetric curve the farthest vertices tie to within rounding, so
+    that would pick other vertices than the compiled kernel, which is built with
+    ``-ffp-contract=off`` for the same reason.
+    """
+    dots: Array = a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1]
+    return dots
+
+
 def _simplify_numpy(
     points: Array, tolerance: float, starts: NDArray[np.intp] | None = None
 ) -> NDArray[np.intp]:
@@ -496,12 +508,12 @@ def _simplify_numpy(
         span = np.minimum(np.searchsorted(kept, positions, side="right") - 1, kept.size - 2)
         a, b = points[kept[span]], points[kept[span + 1]]
         chord = b - a
-        length2 = np.einsum("ij,ij->i", chord, chord)
+        length2 = _dot(chord, chord)
         with np.errstate(invalid="ignore", divide="ignore"):
-            t = np.clip(np.einsum("ij,ij->i", points - a, chord) / length2, 0.0, 1.0)
+            t = np.clip(_dot(points - a, chord) / length2, 0.0, 1.0)
         t[length2 == 0] = 0.0
         offset = points - (a + t[:, None] * chord)
-        distance = np.einsum("ij,ij->i", offset, offset)
+        distance = _dot(offset, offset)
         distance[keep] = 0.0
         worst = np.maximum.reduceat(distance, kept[:-1])
         unresolved = worst > tolerance * tolerance
