@@ -158,12 +158,21 @@ jobs:
           fi
           echo "$KEY_STORE" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "FLET_ANDROID_SIGNING_KEY_STORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+      # Gradle can fail to find a plugin that the repository does have, for a moment. It
+      # also remembers such an answer, so the second attempt starts without its cache.
       - name: Build Android ${{ matrix.target }}
-        run: >-
-          uv run --locked --no-dev --with flet-cli==${{ needs.preflight.outputs.flet }}
-          flet build ${{ matrix.target }} --yes --python-version ${{ env.PYTHON_VERSION }}
-          --build-version ${{ needs.preflight.outputs.version }}
-          --build-number ${{ needs.preflight.outputs.build_number }}
+        run: |
+          build() {
+            uv run --locked --no-dev --with flet-cli==${{ needs.preflight.outputs.flet }} \
+              flet build ${{ matrix.target }} --yes --python-version ${{ env.PYTHON_VERSION }} \
+              --build-version ${{ needs.preflight.outputs.version }} \
+              --build-number ${{ needs.preflight.outputs.build_number }}
+          }
+          build && exit 0
+          echo "::warning::The Android ${{ matrix.target }} build failed; trying once more."
+          rm -rf ~/.gradle/caches/modules-2
+          sleep 60
+          build
       - uses: actions/upload-artifact@v7
         with:
           name: opengraph-android-${{ matrix.target }}-${{ needs.preflight.outputs.label }}
