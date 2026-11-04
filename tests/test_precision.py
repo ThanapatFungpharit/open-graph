@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import threading
 
-import gmpy2
 import numpy as np
 import pytest
 from PIL import Image
@@ -15,11 +14,12 @@ from opengraph.engine import precise
 from opengraph.engine.ast import Node
 from opengraph.engine.compiler import compile_expression
 from opengraph.engine.evaluator import NumericFunction
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.plots import ExplicitPlot, Plot
 from opengraph.engine.sampling import ViewRect
 from opengraph.graph import rendering
 from opengraph.graph.canvas import FILL_ALPHA, GraphCanvas, Layer, fill_png, place_points
-from opengraph.graph.rendering import GeometryLoader, _chain_segments, _simplify, outline
+from opengraph.graph.rendering import GeometryLoader, _chain_segments, _dot, _simplify, outline
 from opengraph.graph.settings import GraphSettings
 from opengraph.graph.viewport import MAX_DEEP_SCALE, MAX_SCALE, Viewport
 from tests.support import drawn_near, stroked_points, wait_until
@@ -182,6 +182,39 @@ def test_compiled_outline_matches_reference(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(compiled) == len(reference)
     for a, b in zip(compiled, reference, strict=True):
         np.testing.assert_array_equal(a, b)
+
+
+@COMPILED
+@pytest.mark.parametrize(
+    "equation",
+    [
+        "x^2 + y^2 = 25",  # symmetric curves: their farthest vertices tie to within rounding
+        "x y = 1",
+        "sin(x) = sin(y)",
+        "x^4 + y^4 = 16",
+        "cos(x) + cos(y) = 1/2",
+    ],
+)
+def test_compiled_outline_breaks_ties_like_the_reference(
+    monkeypatch: pytest.MonkeyPatch, equation: str
+) -> None:
+    view = ViewRect(-6, 6, -6, 6, 600, 600)
+    geometry = plot(equation).sample(view)
+    compiled = outline(geometry, view)
+    monkeypatch.setattr(native, "kernels", None)
+    reference = outline(geometry, view)
+    assert len(compiled) == len(reference)
+    for a, b in zip(compiled, reference, strict=True):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_the_simplifier_rounds_each_operation_on_its_own() -> None:
+    """A dot product that fused its multiply and add would give the other answer here."""
+    big = 1.0 + 2.0**-30
+    a = np.array([[big, 1.0]])
+    product = a[0, 0] * a[0, 0]
+    b = np.array([[big, -product]])
+    assert _dot(a, b)[0] == 0.0
 
 
 @COMPILED

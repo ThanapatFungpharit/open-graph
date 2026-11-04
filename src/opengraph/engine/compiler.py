@@ -75,6 +75,7 @@ from opengraph.engine.parser import parse
 from opengraph.engine.plots import (
     ExplicitPlot,
     ImplicitPlot,
+    ImplicitSurfacePlot,
     ParametricPlot,
     Plot,
     PlotGroup,
@@ -82,6 +83,10 @@ from opengraph.engine.plots import (
     PointSetPlot,
     PolarPlot,
     RegionPlot,
+    SpaceCurvePlot,
+    SpacePointPlot,
+    SpacePointSetPlot,
+    SurfacePlot,
 )
 
 MAX_NODES = 5000
@@ -485,7 +490,7 @@ class _Resolver:
         return resolved
 
     def constant(self, name: str) -> Node:
-        """Resolved body of the user constant ``name`` (must not depend on x or y)."""
+        """Resolved body of the user constant ``name`` (must not depend on coordinates)."""
         if name in self.constant_cache:
             return self.constant_cache[name]
         defn = self.definitions[name]
@@ -578,9 +583,10 @@ class _Resolver:
     def resolve_point(
         self, items: tuple[Node, ...], span: Span, locals_: Mapping[str, Node]
     ) -> TupleExpr:
-        """``(a, b)`` inside an expression: a 2-D vector of number-valued coordinates."""
-        if len(items) != 2:
-            raise ResolveError("A point needs exactly two coordinates, like point[1, 2]", span)
+        """``(a, b)`` or ``(a, b, c)`` inside an expression: a vector of number-valued
+        coordinates."""
+        if len(items) not in (2, 3):
+            raise ResolveError("A point needs two or three coordinates, like point[1, 2]", span)
         coords: list[Node] = []
         for item in items:
             value = self.resolve(item, locals_)
@@ -712,7 +718,7 @@ class _Resolver:
             raise ResolveError("Sequences can't contain lists", node.body.span)
         if free_vars(body) - {bound}:
             raise ResolveError(
-                "Sequence terms must be numbers; they can't use x or y", node.body.span
+                "Sequence terms must be numbers; they can't use x, y or z", node.body.span
             )
 
         return SequenceExpr(body, bound, node.domain, node.text, node.span)
@@ -1129,14 +1135,17 @@ def _format_interval(node: IntervalExpr) -> str:
 
 
 def _combine(op: str, left: Node, right: Node, span: Span) -> Node:
-    """``left op right``, with points (``TupleExpr``) as 2-D vectors: points add and
-    subtract component-wise and scale by numbers; anything else with a point is an error."""
+    """``left op right``, with points (``TupleExpr``) as vectors: points add and subtract
+    component-wise and scale by numbers; anything else with a point is an error."""
     if not isinstance(left, TupleExpr) and not isinstance(right, TupleExpr):
         return BinOp(op, left, right, span)
     if op in ("+", "-"):
         if not (isinstance(left, TupleExpr) and isinstance(right, TupleExpr)):
             verb = "add" if op == "+" else "subtract"
             raise ResolveError(f"Can't {verb} a number and a point", span)
+        if len(left.items) != len(right.items):
+            verb = "add" if op == "+" else "subtract"
+            raise ResolveError(f"Can't {verb} a 2D point and a 3D point", span)
         pairs = zip(left.items, right.items, strict=True)
         return TupleExpr(tuple(BinOp(op, a, b, span) for a, b in pairs), span)
     if op == "*":
@@ -1158,8 +1167,7 @@ def _combine(op: str, left: Node, right: Node, span: Span) -> Node:
 
 def _point_plot(point: TupleExpr, span: Span) -> Plot | None:
     """The plot of a resolved point; its coordinates may hold lists (several points)."""
-    x, y = point.items
-    if free_vars(x) or free_vars(y):
+    if any(free_vars(c) for c in point.items):
         raise ResolveError("Point coordinates must be numbers", span)
     if any(intervals(point)):
         plots = [
@@ -1168,13 +1176,25 @@ def _point_plot(point: TupleExpr, span: Span) -> Plot | None:
             if (plot := _continuous_point(cast(TupleExpr, variant))) is not None
         ]
         return _group(plots) if plots else None
-    joint = _joint_values([x, y], False)  # lists in x and y zip together
+    joint = _joint_values(point.items, False)  # lists in the coordinates zip together
     if joint is None:
-        return PointPlot(NumericFunction(x).scalar(), NumericFunction(y).scalar())
-    pairs = tuple(zip(joint[0].tolist(), joint[1].tolist(), strict=True))
-    if len(pairs) > MAX_LIST:
+        return _single_point([NumericFunction(c).scalar() for c in point.items])
+    rows = tuple(zip(*(values.tolist() for values in joint), strict=True))
+    if len(rows) > MAX_LIST:
         raise ResolveError(f"Too many points; the limit is {MAX_LIST}", span)
-    return PointSetPlot(pairs) if pairs else None
+    return _point_set(rows, len(point.items)) if rows else None
+
+
+def _single_point(coordinates: Sequence[float]) -> Plot:
+    if len(coordinates) == 3:
+        return SpacePointPlot(*coordinates)
+    return PointPlot(*coordinates)
+
+
+def _point_set(rows: tuple[tuple[float, ...], ...], dimensions: int) -> Plot:
+    if dimensions == 3:
+        return SpacePointSetPlot(cast(tuple[tuple[float, float, float], ...], rows))
+    return PointSetPlot(cast(tuple[tuple[float, float], ...], rows))
 
 
 def _continuous_point(point: TupleExpr, *, complex_mode: bool = False) -> Plot | None:
@@ -1182,9 +1202,18 @@ def _continuous_point(point: TupleExpr, *, complex_mode: bool = False) -> Plot |
     if domain.lo == domain.hi:
         if not (domain.closed_lo and domain.closed_hi):
             return None
-        return PointPlot(*(NumericFunction(c, complex_mode).scalar(t=0) for c in coordinates))
-    x, y = (Bounded(c, Var("t"), domain) for c in coordinates)
-    return ParametricPlot(x, y, 0, 1, complex_mode)
+        return _single_point([NumericFunction(c, complex_mode).scalar(t=0) for c in coordinates])
+    return _curve_plot([Bounded(c, Var("t"), domain) for c in coordinates], 0, 1, complex_mode)
+
+
+def _curve_plot(
+    coordinates: Sequence[Node], t_min: float, t_max: float, complex_mode: bool
+) -> Plot:
+    if len(coordinates) == 3:
+        x, y, z = coordinates
+        return SpaceCurvePlot(x, y, z, t_min, t_max, complex_mode)
+    x, y = coordinates
+    return ParametricPlot(x, y, t_min, t_max, complex_mode)
 
 
 def _continuous_complex_plot(node: Node) -> Plot | None:
@@ -1475,8 +1504,8 @@ def _value_row(node: Node, options: CompileOptions) -> RowResult:
 
 def _point_coordinates(items: Sequence[Node], resolver: _Resolver, span: Span) -> list[Node]:
     """Point coordinates are numeric; parameters belong to parametric(...)."""
-    if len(items) != 2:
-        raise ResolveError("A point needs exactly two coordinates, like point[1, 2]", span)
+    if len(items) not in (2, 3):
+        raise ResolveError("A point needs two or three coordinates, like point[1, 2]", span)
     coords: list[Node] = []
     for item in items:
         node = resolver.resolve_value(item)
@@ -1498,7 +1527,8 @@ def _drag_coordinate(node: Node) -> DragCoordinate:
 
 
 def _points(stmt: TupleExpr | ListExpr, resolver: _Resolver) -> RowResult:
-    """``(a, b)``, ``(a, b), (c, d)``, ``[(a, b), …]`` or ``(k, k^2)`` with a list k."""
+    """``(a, b)``, ``(a, b), (c, d)``, ``[(a, b), …]`` or ``(k, k^2)`` with a list k; each
+    with a third coordinate for points in space."""
     tuples = [stmt] if isinstance(stmt, TupleExpr) else list(stmt.items)
     resolved_points = []
     for item in tuples:
@@ -1507,25 +1537,29 @@ def _points(stmt: TupleExpr | ListExpr, resolver: _Resolver) -> RowResult:
         resolved_points.append(
             TupleExpr(tuple(_point_coordinates(item.items, resolver, item.span)))
         )
+    dimensions = len(resolved_points[0].items)
+    if any(len(point.items) != dimensions for point in resolved_points):
+        raise ResolveError("A list of points can't mix 2D and 3D points", stmt.span)
     if any(any(intervals(point)) for point in resolved_points):
         plots = [
             plot for point in resolved_points if (plot := _point_plot(point, stmt.span)) is not None
         ]
         return RowResult(plot=_group(plots) if plots else None)
-    pairs: list[tuple[float, float]] = []
+    rows: list[tuple[float, ...]] = []
     for point in resolved_points:
-        x, y = point.items
-        joint = _joint_values([x, y], False)  # lists in x and y zip together
+        joint = _joint_values(point.items, False)  # lists in the coordinates zip together
         if joint is None:
-            pairs.append((NumericFunction(x).scalar(), NumericFunction(y).scalar()))
+            rows.append(tuple(NumericFunction(c).scalar() for c in point.items))
         else:
-            pairs.extend(zip(joint[0].tolist(), joint[1].tolist(), strict=True))
-    if isinstance(stmt, TupleExpr) and len(pairs) == 1:
+            rows.extend(zip(*(values.tolist() for values in joint), strict=True))
+    if isinstance(stmt, TupleExpr) and len(rows) == 1:
+        if dimensions == 3:  # a drag on the screen doesn't say where in space to go
+            return RowResult(plot=_single_point(rows[0]))
         drag = (_drag_coordinate(stmt.items[0]), _drag_coordinate(stmt.items[1]))
-        return RowResult(plot=PointPlot(*pairs[0]), drag=drag)
-    if len(pairs) > MAX_LIST:
+        return RowResult(plot=_single_point(rows[0]), drag=drag)
+    if len(rows) > MAX_LIST:
         raise ResolveError(f"Too many points; the limit is {MAX_LIST}", stmt.span)
-    return RowResult(plot=PointSetPlot(tuple(pairs)) if pairs else None)
+    return RowResult(plot=_point_set(tuple(rows), dimensions) if rows else None)
 
 
 def _classify(
@@ -1679,31 +1713,38 @@ def _classify_row(
         return RowResult(message=f"{stmt.args[0].name} = {source(body, degrees=options.degrees)}")
 
     if isinstance(stmt, Call) and stmt.name == "parametric":
-        if len(stmt.args) != 4 or not isinstance(stmt.args[2], Name):
-            raise ResolveError("Use parametric(cos(u), sin(u) for u in [0, 2pi])", stmt.span)
-        parameter = stmt.args[2].name
+        if len(stmt.args) not in (4, 5) or not isinstance(stmt.args[-2], Name):
+            raise ResolveError(
+                "Use parametric(cos(u), sin(u) for u in [0, 2pi]), "
+                "or parametric(cos(u), sin(u), u for u in [0, 2pi]) in space",
+                stmt.span,
+            )
+        parameter = stmt.args[-2].name
         if parameter in RESERVED - set(PLOT_VARIABLES):
-            raise ResolveError("Choose an ordinary parameter name", stmt.args[2].span)
-        interval = resolver.resolve_value(stmt.args[3])
+            raise ResolveError("Choose an ordinary parameter name", stmt.args[-2].span)
+        interval = resolver.resolve_value(stmt.args[-1])
         if not isinstance(interval, IntervalExpr):
-            raise ResolveError("The parameter range must be an interval", stmt.args[3].span)
+            raise ResolveError("The parameter range must be an interval", stmt.args[-1].span)
         assert isinstance(interval.lo, Num) and isinstance(interval.hi, Num)
         if interval.lo.value == interval.hi.value and not (
             interval.closed_lo and interval.closed_hi
         ):
             return RowResult(message="Empty parameter range: nothing to plot")
-        coordinates = [resolver.resolve_root(a, {parameter: Var("t")}) for a in stmt.args[:2]]
+        coordinates = [resolver.resolve_root(a, {parameter: Var("t")}) for a in stmt.args[:-2]]
         if any(free_vars(c) - {"t"} or contains(c, ListExpr) for c in coordinates):
             raise ResolveError("Parametric coordinates must use only their parameter", stmt.span)
         if interval.lo.value == interval.hi.value:
-            a, b = (
-                NumericFunction(c, options.complex_mode).scalar(t=interval.lo.value)
-                for c in coordinates
+            return RowResult(
+                plot=_single_point(
+                    [
+                        NumericFunction(c, options.complex_mode).scalar(t=interval.lo.value)
+                        for c in coordinates
+                    ]
+                )
             )
-            return RowResult(plot=PointPlot(a, b))
-        x, y = (Bounded(c, Var("t"), interval) for c in coordinates)
+        bounded = [Bounded(c, Var("t"), interval) for c in coordinates]
         return RowResult(
-            plot=ParametricPlot(x, y, interval.lo.value, interval.hi.value, options.complex_mode)
+            plot=_curve_plot(bounded, interval.lo.value, interval.hi.value, options.complex_mode)
         )
 
     if isinstance(stmt, Relation) and stmt.op != "=":
@@ -1788,6 +1829,8 @@ def _classify_row(
         return _explicit(node, "x", options, stmt.span)
     if used <= {THETA, RADIUS}:
         raise ResolveError("Polar expressions need an equation, like r = sin(θ)", stmt.span)
+    if "z" in used:
+        raise ResolveError("Expressions using z need an equation, like x = z^2", stmt.span)
     raise ResolveError("Expressions using y need an equation, like x = y^2", stmt.span)
 
 
@@ -2043,6 +2086,10 @@ def _classify_inequality(stmt: Relation, resolver: _Resolver, options: CompileOp
         raise ResolveError("Inequalities are not available in complex mode", span)
     difference: Node = BinOp("-", left, right, span)
     used = free_vars(difference)
+    if "z" in used:
+        raise ResolveError(
+            "Inequalities in space aren't supported; graph the boundary, like z = x^2", span
+        )
     if not used:
         values = _list_values(difference, False)
         if values is None:
@@ -2085,8 +2132,10 @@ def _classify_equation(stmt: Relation, resolver: _Resolver, options: CompileOpti
             solved=(found.name, found.values),
         )
     lvars, rvars = free_vars(left), free_vars(right)
+    if "z" in lvars | rvars:
+        return _classify_surface(left, right, span, options)
     for dep, other, other_vars in ((left, right, rvars), (right, left, lvars)):
-        if isinstance(dep, Var) and dep.name in PLOT_VARIABLES:
+        if isinstance(dep, Var) and dep.name in ("x", "y"):
             indep = "x" if dep.name == "y" else "y"
             if other_vars <= {indep}:
                 return _explicit(other, indep, options, span)
@@ -2142,6 +2191,50 @@ def _classify_equation(stmt: Relation, resolver: _Resolver, options: CompileOpti
         plot=plot,
         message="Numerical contour: small features and unrecognized tangent zeros may be missed",
     )
+
+
+def _classify_surface(left: Node, right: Node, span: Span, options: CompileOptions) -> RowResult:
+    """An equation using z: a surface, explicit where one side is a lone coordinate that
+    the other side doesn't use, or where the equation is linear in a coordinate."""
+    if options.complex_mode:
+        raise ResolveError(
+            "3D graphs aren't available in complex mode; z is the third coordinate, "
+            "so give a complex value another name",
+            span,
+        )
+    _reject_interval(left, left.span)
+    _reject_interval(right, right.span)
+    used = free_vars(left) | free_vars(right)
+    if used & {THETA, RADIUS}:
+        raise ResolveError("Use either x, y and z or r and θ in one equation", span)
+    for dep, other in ((left, right), (right, left)):
+        if isinstance(dep, Var) and dep.name not in free_vars(other):
+            plots: list[Plot] = [SurfacePlot(v, dep.name) for v in _curves(_expand(other), span)]
+            if not plots:
+                return RowResult(message="Empty list: nothing to plot")
+            return RowResult(plot=_group(plots))
+    difference: Node = BinOp("-", left, right, span)
+    variants = _curves(_expand(difference), span)
+    if not variants:
+        return RowResult(message="Empty list: nothing to plot")
+    surfaces: list[Plot] = []
+    for variant in variants:
+        solved = next(
+            (
+                (var, node)
+                for var in ("z", "y", "x")
+                if var in free_vars(variant)
+                and (node := _solve_linear(variant, var, options)) is not None
+            ),
+            None,
+        )
+        if solved is not None:
+            surfaces.append(SurfacePlot(solved[1], solved[0]))
+        else:
+            surfaces.append(ImplicitSurfacePlot(variant))
+    implicit = any(isinstance(plot, ImplicitSurfacePlot) for plot in surfaces)
+    message = "Numerical surface: small features may be missed" if implicit else ""
+    return RowResult(plot=_group(surfaces), message=message)
 
 
 def _offer_solving(

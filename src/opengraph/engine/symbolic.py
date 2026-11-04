@@ -320,7 +320,7 @@ def to_source(expr: Any, options: CompileOptions | None = None) -> str:
     options = options or CompileOptions()
     text = _print(expr, options)
     names = {s.name for s in expr.free_symbols}
-    source = f"x = {text}" if "y" in names else text
+    source = f"x = {text}" if names & {"y", "z"} else text
     if names - _PLOT_NAMES:
         # User constants kept as names compile only beside their definitions: check the
         # syntax alone.

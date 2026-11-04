@@ -55,13 +55,14 @@ def _is_hover(event: ft.Event[ft.Container]) -> bool:
 
 
 def _style_actions(row: ExpressionRow | TableRow) -> None:
-    """Show a row's menu and delete buttons only while it is hovered or being edited.
+    """Show a row's menu and delete buttons only while it is hovered or being edited, or
+    always on a touch device, which has no hover.
 
     Hidden buttons only become transparent: they stay clickable and the layout never
     shifts.
     """
     current = theme.current()
-    shown = row.hover or row.current
+    shown = row.hover or row.current or runtime.device.touch
     for button in (row.menu_button, row.delete_button):
         button.opacity = 1.0 if shown else 0.0
         button.icon_color = current.muted

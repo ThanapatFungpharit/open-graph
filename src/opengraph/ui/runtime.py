@@ -101,6 +101,17 @@ class Clipboard:
 clipboard = Clipboard()
 
 
+@dataclass(slots=True)
+class Device:
+    """What the interface runs on, set once when the application starts."""
+
+    touch: bool = False  # a phone or tablet, in an app or a browser: no hover, no wheel
+    native_mobile: bool = False  # the Android or iOS app (not a browser)
+
+
+device = Device()
+
+
 class FocusTracker:
     """Which text input has the keyboard focus, as reported by the inputs.
 
@@ -109,13 +120,16 @@ class FocusTracker:
 
     def __init__(self) -> None:
         self.owner: object | None = None
+        self.changed = events.Signal()
 
     def gained(self, owner: object) -> None:
         self.owner = owner
+        self.changed.emit()
 
     def lost(self, owner: object) -> None:
         if self.owner is owner:
             self.owner = None
+            self.changed.emit()
 
 
 focus_tracker = FocusTracker()

@@ -60,7 +60,9 @@ def extensions() -> list[Extension]:
     from Cython.Build import cythonize
 
     include, library_dirs = gmpy2_paths()
-    optimize = ["/O2"] if sys.platform == "win32" else ["-O3"]
+    # Results must match the Python references exactly, so multiply and add may not be
+    # fused into one operation, which rounds differently (MSVC doesn't by default).
+    optimize = ["/O2"] if sys.platform == "win32" else ["-O3", "-ffp-contract=off"]
     kernels = Extension(
         "opengraph.native._kernels",
         ["src/opengraph/native/_kernels.pyx"],

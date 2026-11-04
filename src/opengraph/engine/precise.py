@@ -37,7 +37,6 @@ from fractions import Fraction
 from functools import lru_cache
 from typing import Any, cast
 
-import gmpy2
 import numpy as np
 from numpy.typing import NDArray
 
@@ -55,6 +54,7 @@ from opengraph.engine.ast import (
     free_vars,
 )
 from opengraph.engine.cancellation import checkpoint
+from opengraph.engine.multiprecision import gmpy2
 
 Mpfr = Any  # gmpy2.mpfr (gmpy2 ships no type information)
 

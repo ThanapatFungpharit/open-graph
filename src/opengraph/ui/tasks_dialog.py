@@ -80,6 +80,15 @@ class TasksDialog:
         manager.changed.connect(self.refresh)
         self.refresh()
 
+    def set_compact(self, compact: bool) -> None:
+        """On a narrow screen the panel spans the window."""
+        content = self.control.content
+        assert isinstance(content, ft.Container)
+        content.width = None if compact else 560
+        self.control.left = 8 if compact else None
+        self.control.right, self.control.bottom = (8, 8) if compact else (12, 12)
+        runtime.push(self.control)
+
     def show(self) -> None:
         self.visible = self.control.visible = True
         self.refresh()

@@ -12,6 +12,14 @@ layer — the row being edited — and can be hovered to inspect or clicked to p
 Points of a *draggable* layer can be dragged: the canvas reports where the point should
 go (rounded to about a pixel) and the owner of the layer moves it.
 
+A layer that draws in space turns the whole graph into a 3D view
+(:mod:`~opengraph.graph.view3d`): an image computed in the background, with labels drawn
+over it. Dragging then turns the view. Points of interest and point dragging are for the
+plane, and are not offered there.
+
+On a touch device one finger does what the mouse's drag does, two fingers pinch and pan,
+and a long press reads coordinates along the curves, since a finger can't hover.
+
 Pointer, wheel and key handling live in methods that take plain coordinates
 (:meth:`GraphCanvas.press`, :meth:`GraphCanvas.wheel`, ...); the Flet gesture detector
 only forwards to them. Drawing builds a list of canvas shapes (:meth:`GraphCanvas.render`)
@@ -38,7 +46,6 @@ from functools import partial
 
 import flet as ft
 import flet.canvas as cv
-import gmpy2
 import numpy as np
 
 from opengraph import colors, events, native
@@ -51,9 +58,11 @@ from opengraph.engine.analysis import (
     sample_grid,
 )
 from opengraph.engine.builtins import Array
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.plots import ExplicitPlot, Geometry, Plot, PointPlot, PointSetPlot, members
 from opengraph.engine.sampling import ViewRect, to_axis
 from opengraph.graph.background import LatestTask
+from opengraph.graph.raster import Style
 from opengraph.graph.rendering import (
     FillImage,
     GeometryLoader,
@@ -74,6 +83,7 @@ from opengraph.graph.ticks import (
     log_ticks,
     tick_indices,
 )
+from opengraph.graph.view3d import KEY_TURN, Frame, SpaceLayer, View3D
 from opengraph.graph.viewport import VIEW_BITS, Viewport
 from opengraph.ui import fonts, runtime
 from opengraph.ui.geometry import Point, Rect
@@ -85,6 +95,7 @@ CURVE_WIDTH = 2.5
 POINT_RADIUS = 5.0
 POI_RADIUS = 4.0
 HOVER_RADIUS_PX = 12.0
+TOUCH_RADIUS_PX = 26.0  # how near a finger has to come; it covers what is under it
 WHEEL_ZOOM_BASE = 1.0015  # per wheel angle unit: one notch (120) ~ 1.2x
 WHEEL_UNITS_PER_PX = 1.2  # Flutter reports about 100 px per notch; Qt reported 120 units
 KEY_PAN_PX = 60.0
@@ -210,6 +221,15 @@ class GraphCanvas:
         self.viewport = Viewport()
         self.settings = GraphSettings()
         self.colors = LIGHT_COLORS
+        self.view3d = View3D()
+        self.view3d.changed.connect(self.update)
+        self.view3d.finished.connect(self.rendering_finished.emit)
+        self._space_frame: Frame | None = None
+        # The frame on screen over the one before it: the client decodes an image
+        # asynchronously, and the old one covers the gap until it is ready.
+        self._space_images: list[cv.Shape] = []
+        self._space_labels: list[cv.Shape] = []
+        self._space_labels_key: tuple[object, ...] | None = None
         self._layers: list[Layer] = []
         self._cache: dict[Hashable, list[_CacheEntry]] = {}
         self._prepared: dict[TileKey, _CacheEntry] = {}
@@ -240,16 +260,32 @@ class GraphCanvas:
             content=ft.Container(self.canvas, bgcolor="#00000000"),
             mouse_cursor=ft.MouseCursor.GRAB,
             drag_interval=8,
-            on_pan_down=lambda e: self.press(_xy(e.local_position)),
-            on_pan_update=lambda e: self.move(_xy(e.local_position)),
-            on_pan_end=lambda e: self.release(_xy(e.local_position)),
-            on_pan_cancel=lambda _: self.cancel_press(),
-            on_tap_up=lambda e: self.release(_xy(e.local_position)),
-            on_hover=lambda e: self.move(_xy(e.local_position)),
-            on_exit=lambda _: self.leave(),
-            on_scroll=self._on_scroll,
             on_double_tap_down=lambda e: self.double_click(_xy(e.local_position)),
         )
+        if runtime.device.touch:
+            # Flutter's scale gesture also covers one finger, and can't share it with pan.
+            detector = self.detector
+            detector.on_scale_start = lambda e: self.touch_start(
+                _xy(e.local_focal_point), e.pointer_count
+            )
+            detector.on_scale_update = lambda e: self.touch_move(
+                _xy(e.local_focal_point), e.scale, e.pointer_count
+            )
+            detector.on_scale_end = lambda _: self.touch_end()
+            detector.on_tap_up = lambda e: self.tap(_xy(e.local_position))
+            detector.on_long_press_start = lambda e: self.read_at(_xy(e.local_position))
+            detector.on_long_press_move_update = lambda e: self.read_at(_xy(e.local_position))
+        else:
+            detector = self.detector
+            detector.on_pan_down = lambda e: self.press(_xy(e.local_position))
+            detector.on_pan_update = lambda e: self.move(_xy(e.local_position))
+            detector.on_pan_end = lambda e: self.release(_xy(e.local_position))
+            detector.on_pan_cancel = lambda _: self.cancel_press()
+            detector.on_tap_up = lambda e: self.release(_xy(e.local_position))
+            detector.on_hover = lambda e: self.move(_xy(e.local_position))
+            detector.on_exit = lambda _: self.leave()
+            detector.on_scroll = self._on_scroll
+        self._pinch_scale = 1.0
         self.menu = ft.ContextMenu(
             content=self.detector,
             items=[
@@ -282,6 +318,7 @@ class GraphCanvas:
             key: entry for key, entry in self._prepared.items() if key[:2] in identities
         }
         self._analysis.cancel()
+        self.view3d.set_layers([SpaceLayer(la.key, la.plot, la.color) for la in self._layers])
         # Replace obsolete requests immediately, including when all layers are hidden.
         if self._shown or self._geometry.loading:
             self._request_geometry()
@@ -298,13 +335,30 @@ class GraphCanvas:
         if settings.polar_grid and not math.isclose(self.viewport.scale_x, self.viewport.scale_y):
             self.viewport.scale_y = self.viewport.scale_x  # circles must look round
         self._markers_key = None
+        self._style_view3d()
         self._view_changed()
 
     def set_colors(self, colors_: CanvasColors) -> None:
         self.colors = colors_
         self.control.bgcolor = colors_.background
         runtime.push(self.control)
+        self._style_view3d()
         self.update()
+
+    def _style_view3d(self) -> None:
+        def rgb(color: str) -> tuple[int, int, int]:
+            return colors.rgba(color)[:3]
+
+        self.view3d.set_appearance(
+            self.settings,
+            Style(
+                background=rgb(self.colors.background),
+                grid=rgb(self.colors.major_grid),
+                axis=rgb(self.colors.axis),
+                show_grid=self.settings.major_grid,
+                show_axes=self.settings.axes,
+            ),
+        )
 
     def set_focus(self, key: Hashable | None) -> None:
         """The layer whose points of interest are shown (the row being edited)."""
@@ -315,15 +369,37 @@ class GraphCanvas:
             self.update()
 
     def reset_view(self) -> None:
-        self.viewport.reset()
+        if self.view3d.active:
+            self.view3d.reset()
+        else:
+            self.viewport.reset()
         self._view_changed()
 
     def zoom(self, factor: float) -> None:
-        self.viewport.zoom_center(factor)
+        if self.view3d.active:
+            self.view3d.zoom(factor)
+        else:
+            self.viewport.zoom_center(factor)
         self._view_changed()
+
+    def view_state(self) -> dict[str, float]:
+        """The views to save with a document: the plane's and the 3D view's."""
+        return self.viewport.state() | self.view3d.state()
+
+    def axis_range(self, axis: str) -> tuple[float, float]:
+        """The range an axis shows, in the kind of view on screen."""
+        if self.view3d.active:
+            return self.view3d.axis_range(axis)
+        lo, hi = self.viewport.range(axis)
+        return float(lo), float(hi)
 
     def set_range(self, axis: str, lo: float, hi: float) -> bool:
         """Show ``[lo, hi]`` on one axis; with a locked aspect the other axis follows."""
+        if self.view3d.active:
+            if not self.view3d.set_range(axis, lo, hi):
+                return False
+            self._view_changed()
+            return True
         vp = self.viewport
         ratio = vp.scale_y / vp.scale_x
         if not vp.set_range(axis, lo, hi):
@@ -339,6 +415,7 @@ class GraphCanvas:
     def resize(self, width: int, height: int) -> None:
         """The canvas's size on screen (reported by the client, or set by tests)."""
         self.viewport.resize(width, height)
+        self.view3d.resize(width, height)
         self._trace = None
         self._shown = width > 0 and height > 0
         if self._shown:
@@ -356,6 +433,8 @@ class GraphCanvas:
     def _refresh_markers(self) -> None:
         focused = next((layer for layer in self._layers if layer.key == self._focus), None)
         if not self.settings.points_of_interest or focused is None or self.viewport.anchored:
+            return
+        if self.view3d.active:
             return
         if self._geometry.loading:
             self._markers_timer.start()
@@ -383,7 +462,10 @@ class GraphCanvas:
         """Coordinates as this graph's mode reads them: (x, y), r and θ, or a + bi.
 
         ``wx``/``wy`` are canvas world coordinates (offsets from the anchors in a deep
-        zoom, which are formatted from their exact values)."""
+        zoom, which are formatted from their exact values). A 3D view reports the point
+        under the pointer instead, if there is one."""
+        if self.view3d.active:
+            return self._trace.label if self._trace is not None else ""
         upp_x = 0.0 if exact else self._units_per_px("x", wx)
         upp_y = 0.0 if exact else self._units_per_px("y", wy)
         x_value, y_value = self.viewport.absolute("x", wx), self.viewport.absolute("y", wy)
@@ -426,13 +508,14 @@ class GraphCanvas:
 
     # -- geometry ----------------------------------------------------------------------
     def _request_geometry(self) -> None:
-        self._geometry.request(
-            [(layer.key, layer.plot) for layer in self._layers], self.viewport.view_rect()
-        )
+        layers = [] if self.view3d.active else [(la.key, la.plot) for la in self._layers]
+        self._geometry.request(layers, self.viewport.view_rect())
 
     @property
     def is_rendering(self) -> bool:
         """Whether the current view still has visible geometry to load."""
+        if self.view3d.active:
+            return self.view3d.loading
         self._request_geometry()
         return self._geometry.loading
 
@@ -442,6 +525,7 @@ class GraphCanvas:
             self.rendering_finished.emit()
 
     def shutdown(self) -> None:
+        self.view3d.shutdown()
         self._geometry.stop()
         self._analysis.stop()
         self._markers_timer.stop()
@@ -576,6 +660,13 @@ class GraphCanvas:
     def render(self) -> list[cv.Shape]:
         """Build the canvas shapes for the current state (and keep them on the canvas)."""
         started = time.perf_counter()
+        if self.view3d.active:
+            scene = self._space_shapes()
+            self._paint_trace(scene)
+            self.canvas.shapes = scene
+            self.last_paint_ms = (time.perf_counter() - started) * 1000
+            return scene
+        self._space_frame, self._space_images = None, []
         vp = self.viewport
         # The grid, axes and labels below and above the curves depend only on the view;
         # reusing their shapes keeps redraws for hovering or arriving tiles small.
@@ -607,6 +698,35 @@ class GraphCanvas:
         self._paint_point_drag(shapes)
         self.canvas.shapes = shapes
         self.last_paint_ms = (time.perf_counter() - started) * 1000
+        return shapes
+
+    def _space_shapes(self) -> list[cv.Shape]:
+        """The 3D view: its latest image, with the labels that go with that image."""
+        frame = self.view3d.frame
+        if frame is not self._space_frame:
+            self._space_frame = frame
+            if frame is None:
+                self._space_images = []
+            else:
+                image = cv.Image(src=frame.data, x=0, y=0, width=frame.width, height=frame.height)
+                self._space_images = [*self._space_images[-1:], *_freeze([image])]
+        key = (frame, self.settings, self.colors)
+        if key != self._space_labels_key:
+            self._space_labels_key = key
+            labels = self.view3d.labels(numbers=self.settings.axis_numbers)
+            self._space_labels = _freeze(
+                [_text(la.text, Point(la.x, la.y), self.colors.label) for la in labels]
+            )
+        shapes = [*self._space_images, *self._space_labels]
+        if self.view3d.sampling or frame is None:
+            shapes.append(
+                cv.Text(
+                    12,
+                    self.viewport.height - 12 - LABEL_FONT.ascent(),
+                    "Rendering…",
+                    style=_label_style(self.colors.label),
+                )
+            )
         return shapes
 
     def _grid_lines(self, values: list[float], horizontal: bool) -> list[tuple[float, float]]:
@@ -872,6 +992,8 @@ class GraphCanvas:
             return []
         if self.viewport.anchored:  # float64 analysis can't resolve a deep zoom
             return []
+        if self.view3d.active:
+            return []
         focused = next((layer for layer in self._layers if layer.key == self._focus), None)
         if focused is None:
             return []
@@ -924,7 +1046,7 @@ class GraphCanvas:
         for marker in self._current_markers():
             sx, sy = vp.to_screen(marker.poi.x, marker.poi.y)
             dist = math.hypot(sx - pos.x, sy - pos.y)
-            if dist <= HOVER_RADIUS_PX and (best is None or dist < best[0]):
+            if dist <= _reach() and (best is None or dist < best[0]):
                 best = (dist, marker)
         return None if best is None else best[1]
 
@@ -965,7 +1087,7 @@ class GraphCanvas:
     # -- hit testing ------------------------------------------------------------------------
     def _draggable_at(self, pos: Point) -> tuple[Layer, Point] | None:
         """The draggable layer whose point is under ``pos``, and that point on screen."""
-        if self.viewport.anchored:  # dragging rewrites float64 coordinates
+        if self.viewport.anchored or self.view3d.active:  # dragging works in the plane
             return None
         best: tuple[float, Layer, Point] | None = None
         for layer in reversed(self._layers):  # topmost first wins ties
@@ -977,7 +1099,7 @@ class GraphCanvas:
                     continue
                 point = Point(*(float(v) for v in self.viewport.to_screen(part.x, part.y)))
                 dist = math.hypot(point.x - pos.x, point.y - pos.y)
-                if dist <= HOVER_RADIUS_PX and (best is None or dist < best[0]):
+                if dist <= _reach() and (best is None or dist < best[0]):
                     best = (dist, layer, point)
         return None if best is None else (best[1], best[2])
 
@@ -995,6 +1117,11 @@ class GraphCanvas:
 
     def _find_trace(self, pos: Point) -> _Trace | None:
         """The point to highlight for a mouse position, if one is close enough."""
+        if self.view3d.active:
+            picked = self.view3d.pick(pos.x, pos.y, _reach())
+            if picked is None:
+                return None
+            return _Trace(Point(*picked.screen), picked.text, picked.color)
         marker = self._marker_at(pos)
         if marker is not None:
             position = Point(
@@ -1014,7 +1141,7 @@ class GraphCanvas:
             if not (math.isfinite(sx) and math.isfinite(sy)):
                 return False
             dist = math.hypot(sx - mx, sy - my)
-            if dist > HOVER_RADIUS_PX:
+            if dist > _reach():
                 return False
             if best is None or dist < best[0]:
                 best = (dist, wx, wy, exact, layer)
@@ -1117,6 +1244,14 @@ class GraphCanvas:
         ctrl = runtime.modifiers.ctrl if ctrl is None else ctrl
         shift = runtime.modifiers.shift if shift is None else shift
         factor = WHEEL_ZOOM_BASE**delta
+        if self.view3d.active:
+            # Ctrl zooms the floor of the box and Shift its height, unless locked.
+            axes = "xyz"
+            if not self.settings.lock_aspect:
+                axes = "xy" if ctrl else "z" if shift else "xyz"
+            self.view3d.zoom(factor, axes)
+            self._view_changed()
+            return
         independent = not self.settings.lock_aspect and not self.settings.polar_grid
         if independent and ctrl:
             self.viewport.zoom_axes_at(pos.x, pos.y, factor, 1.0)  # x only
@@ -1143,6 +1278,7 @@ class GraphCanvas:
         self._drag_last = pos
         self._press_pos = pos
         self._trace = None
+        self.view3d.set_moving(True)
         self._set_cursor(ft.MouseCursor.GRABBING)
         self.update()
 
@@ -1160,7 +1296,12 @@ class GraphCanvas:
         elif self._drag_last is not None:
             delta = pos - self._drag_last
             self._drag_last = pos
-            self.viewport.pan_pixels(delta.x, delta.y)
+            if not self.view3d.active:
+                self.viewport.pan_pixels(delta.x, delta.y)
+            elif runtime.modifiers.shift:
+                self.view3d.pan(delta.x, delta.y)
+            else:
+                self.view3d.turn(delta.x, delta.y)
             self._view_changed()
         else:
             trace = self._find_trace(pos)
@@ -1183,6 +1324,7 @@ class GraphCanvas:
             return
         press = self._press_pos
         self._drag_last = self._press_pos = None
+        self.view3d.set_moving(False)
         self._set_cursor(ft.MouseCursor.GRAB)
         if pos is None:
             return
@@ -1195,6 +1337,59 @@ class GraphCanvas:
         if self._point_drag is not None:
             self.release(None)
         self._drag_last = self._press_pos = None
+        self.view3d.set_moving(False)
+
+    # -- touch ------------------------------------------------------------------------------
+    def touch_start(self, pos: Point, pointers: int) -> None:
+        """One or more fingers started moving: as a press, with room for a pinch."""
+        self._pinch_scale = 1.0
+        self._trace = None
+        if pointers == 1:
+            self.press(pos)
+            return
+        self.pressed.emit()
+        self._drag_last = pos
+        self.view3d.set_moving(True)
+        self.update()
+
+    def touch_move(self, pos: Point, scale: float, pointers: int) -> None:
+        """The fingers moved: one drags as the mouse does; two also pinch, about their
+        centre, and move the view without turning it."""
+        if pointers == 1:
+            self.move(pos)
+            return
+        factor = scale / self._pinch_scale if self._pinch_scale > 0 and scale > 0 else 1.0
+        self._pinch_scale = scale
+        last = self._drag_last or pos
+        self._drag_last = pos
+        delta = pos - last
+        if self.view3d.active:
+            self.view3d.pan(delta.x, delta.y)
+            self.view3d.zoom(factor)
+        else:
+            self.viewport.pan_pixels(delta.x, delta.y)
+            self.viewport.zoom_at(pos.x, pos.y, factor)
+        self._view_changed()
+
+    def touch_end(self) -> None:
+        if self._point_drag is not None:
+            self.release(None)
+        self._drag_last = self._press_pos = None
+        self.view3d.set_moving(False)
+        self.update()
+
+    def tap(self, pos: Point) -> None:
+        """A finger touched and left: pin a label, and read what is under it."""
+        self.toggle_pin_at(pos)
+        self.read_at(pos)
+
+    def read_at(self, pos: Point) -> None:
+        """Show the coordinates of what is under a finger, as hovering does for a mouse."""
+        trace = self._find_trace(pos)
+        if trace != self._trace:
+            self._trace = trace
+            self.update()
+        self.cursor_moved.emit(*(float(v) for v in self.viewport.to_world(pos.x, pos.y)))
 
     def toggle_pin_at(self, pos: Point) -> bool:
         """Click on a point of interest: pin (or unpin) its label."""
@@ -1208,7 +1403,10 @@ class GraphCanvas:
 
     def double_click(self, pos: Point, *, shift: bool | None = None) -> None:
         shift = runtime.modifiers.shift if shift is None else shift
-        self.viewport.zoom_at(pos.x, pos.y, 0.5 if shift else 2.0)
+        if self.view3d.active:
+            self.view3d.zoom(0.5 if shift else 2.0)
+        else:
+            self.viewport.zoom_at(pos.x, pos.y, 0.5 if shift else 2.0)
         self._view_changed()
 
     def leave(self) -> None:
@@ -1218,6 +1416,8 @@ class GraphCanvas:
 
     def handle_key(self, key: str) -> bool:
         """Keyboard navigation (when no text field has the focus); True if handled."""
+        if self.view3d.active:
+            return self._handle_key_3d(key)
         vp = self.viewport
         if key in ("+", "=", "Numpad Add", "Numpad Equal"):
             vp.zoom_center(1.25)
@@ -1238,6 +1438,27 @@ class GraphCanvas:
         self._view_changed()
         return True
 
+    def _handle_key_3d(self, key: str) -> bool:
+        view = self.view3d
+        if key in ("+", "=", "Numpad Add", "Numpad Equal"):
+            view.zoom(1.25)
+        elif key in ("-", "_", "Numpad Subtract"):
+            view.zoom(0.8)
+        elif key == "Arrow Left":
+            view.turn_by(-KEY_TURN, 0.0)
+        elif key == "Arrow Right":
+            view.turn_by(KEY_TURN, 0.0)
+        elif key == "Arrow Up":
+            view.turn_by(0.0, KEY_TURN)
+        elif key == "Arrow Down":
+            view.turn_by(0.0, -KEY_TURN)
+        elif key in ("Home", "0", "Numpad 0"):
+            view.reset()
+        else:
+            return False
+        self._view_changed()
+        return True
+
     async def capture_png(self) -> bytes:
         """The canvas as drawn on the client, as PNG data."""
         await self.canvas.capture()
@@ -1245,6 +1466,11 @@ class GraphCanvas:
             return await self.canvas.get_capture()
         finally:
             await self.canvas.clear_capture()  # type: ignore[no-untyped-call]
+
+
+def _reach() -> float:
+    """How far from something the pointer can be and still be on it."""
+    return TOUCH_RADIUS_PX if runtime.device.touch else HOVER_RADIUS_PX
 
 
 def _xy(offset: ft.Offset | None) -> Point:

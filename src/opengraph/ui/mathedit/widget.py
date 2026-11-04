@@ -27,6 +27,12 @@ _MARGIN_X = 3.0
 _MARGIN_Y = 4.0
 _SCROLL_MARGIN = 12.0  # keep this much room around the caret when scrolling
 _BLINK_MS = 530
+# Soft keyboards send no key event for Backspace: the field's text just gets shorter, and
+# an empty field wouldn't change at all. So on a touch device it is kept full of characters
+# that are never inserted, for the keyboard to delete.
+_FIELD_PADDING = "\u200b" * 64
+_FIELD_REFILL_BELOW = 8
+_FIELD_REFILL_ABOVE = 512
 _FIELD_SUPPRESS_S = 0.25  # how long after Ctrl+Y the hidden field's own redo is ignored
 _DEFAULT_WIDTH = 300.0  # until the client reports the real width
 
@@ -99,12 +105,16 @@ class MathEdit:
             # A painted background makes the whole area receive pointer events.
             content=ft.Container(self.canvas, bgcolor="#00000000"),
             mouse_cursor=ft.MouseCursor.TEXT,
-            on_pan_down=lambda e: self.press(_xy(e.local_position)),
-            on_pan_update=lambda e: self.drag_to(_xy(e.local_position)),
-            on_pan_end=lambda _: self.release(),
-            on_pan_cancel=lambda _: self.release(),
             on_double_tap_down=lambda e: self.double_click(_xy(e.local_position)),
         )
+        if runtime.device.touch:
+            # A finger moving over a row scrolls the list instead of selecting text.
+            self.detector.on_tap_down = lambda e: self.click(_xy(e.local_position))
+        else:
+            self.detector.on_pan_down = lambda e: self.press(_xy(e.local_position))
+            self.detector.on_pan_update = lambda e: self.drag_to(_xy(e.local_position))
+            self.detector.on_pan_end = lambda _: self.release()
+            self.detector.on_pan_cancel = lambda _: self.release()
         self._menu_items = {
             "undo": ft.PopupMenuItem("Undo", on_click=lambda _: self.undo()),
             "redo": ft.PopupMenuItem("Redo", on_click=lambda _: self.redo()),
@@ -120,23 +130,28 @@ class MathEdit:
             ),
         }
         items = self._menu_items
-        self.menu = ft.ContextMenu(
-            content=self.detector,
-            items=[
-                items["undo"],
-                items["redo"],
-                ft.PopupMenuItem(),
-                items["cut"],
-                items["copy"],
-                items["paste"],
-                ft.PopupMenuItem(),
-                items["select_all"],
-                ft.PopupMenuItem(),
-                items["latex"],
-                ft.PopupMenuItem(),
-                items["linear"],
-            ],
-        )
+        menu_items = [
+            items["undo"],
+            items["redo"],
+            ft.PopupMenuItem(),
+            items["cut"],
+            items["copy"],
+            items["paste"],
+            ft.PopupMenuItem(),
+            items["select_all"],
+            ft.PopupMenuItem(),
+            items["latex"],
+            ft.PopupMenuItem(),
+            items["linear"],
+        ]
+        if runtime.device.touch:  # no right button: a long press opens the menu
+            self.menu = ft.ContextMenu(
+                content=self.detector,
+                primary_items=menu_items,
+                primary_trigger=ft.ContextMenuTrigger.LONG_PRESS,
+            )
+        else:
+            self.menu = ft.ContextMenu(content=self.detector, items=menu_items)
         # Receives the characters typed while the editor has the focus; drawn invisibly
         # beneath the canvas.
         self.input = ft.TextField(
@@ -159,6 +174,10 @@ class MathEdit:
             on_focus=lambda _: self._set_focus(True),
             on_blur=lambda _: self._set_focus(False),
         )
+        if runtime.device.touch:
+            self.input.keyboard_type = ft.KeyboardType.VISIBLE_PASSWORD  # no word prediction
+            self.input.capitalization = ft.TextCapitalization.NONE
+            self.input.on_submit = lambda _: self.handle_key("Enter")
         self.control = ft.Stack([self.input, self.menu], height=self._content_height())
         self._refresh()
 
@@ -378,10 +397,7 @@ class MathEdit:
                 _focused._set_focus(False)
             _focused = self
             runtime.focus_tracker.gained(self)
-            self._typed = ""
-            if self.input.value:
-                self.input.value = ""
-                runtime.push(self.input)
+            self._reset_field()
             self._caret_visible = True
             self._blink.start()
         else:
@@ -394,12 +410,29 @@ class MathEdit:
         self.focus_changed.emit(focused)
 
     # -- keyboard -----------------------------------------------------------------------
+    def _reset_field(self) -> None:
+        """Start the hidden field over: empty, or with its padding on a touch device."""
+        fresh = _FIELD_PADDING if runtime.device.touch else ""
+        self._typed = fresh
+        if (self.input.value or "") != fresh:
+            self.input.value = fresh
+            if fresh:
+                self.input.selection = ft.TextSelection(len(fresh), len(fresh))
+            runtime.push(self.input)
+
     def _on_input_change(self) -> None:
         value = self.input.value or ""
-        typed = _inserted(self._typed, value)
+        old = self._typed
+        typed = _inserted(old, value)
         self._typed = value
         if time.monotonic() < self._suppress_until:
             return  # the field replaying its own redo history
+        if runtime.device.touch:
+            if len(value) < len(old) and old.startswith(value):
+                for _ in range(len(old) - len(value)):
+                    self.handle_key("Backspace")
+            if not _FIELD_REFILL_BELOW <= len(value) <= _FIELD_REFILL_ABOVE:
+                self._reset_field()
         typed = "".join(ch for ch in typed if ch.isprintable())
         if typed:
             self.type_text(typed)

@@ -79,6 +79,7 @@ class GraphSettingsDialog:
                 spacing=6,
             )
         ]
+        self._axis_rows = axis_rows
         for axis in ("x", "y"):
             edited = partial(self._on_bounds_edited, axis)
             lo, hi = self._field(90, edited), self._field(90, edited)
@@ -100,6 +101,13 @@ class GraphSettingsDialog:
             axis_rows.append(
                 ft.Row([ft.Text(f"{axis}-axis", width=44), lo, hi, step, scale], spacing=6)
             )
+        # Only a 3D view has this axis; it shares the columns of the others.
+        z_edited = partial(self._on_bounds_edited, "z")
+        self.bounds["z"] = (self._field(90, z_edited), self._field(90, z_edited))
+        self.z_row = ft.Row(
+            [ft.Text("z-axis", width=44), *self.bounds["z"]], spacing=6, visible=False
+        )
+        axis_rows.append(self.z_row)
         self.lock_aspect = _checkbox("Lock aspect ratio (Ctrl/Shift+wheel zooms one axis when off)")
         self.note = ft.Text("", size=12, visible=False)
 
@@ -199,6 +207,18 @@ class GraphSettingsDialog:
     def is_visible(self) -> bool:
         return self.visible
 
+    def set_compact(self, compact: bool) -> None:
+        """On a narrow screen the panel fills the window, and its rows wrap."""
+        content = self.control.content
+        assert isinstance(content, ft.Container)
+        content.width = None if compact else 520
+        self.control.left, self.control.bottom = (8, 8) if compact else (None, None)
+        self.control.right, self.control.top = (8, 8) if compact else (12, 12)
+        for row in self._axis_rows:
+            if isinstance(row, ft.Row):
+                row.wrap = compact
+        runtime.push(self.control)
+
     def show(self) -> None:
         self.visible = self.control.visible = True
         runtime.push(self.control)
@@ -245,9 +265,17 @@ class GraphSettingsDialog:
             self._updating = False
         runtime.push(self.control)
 
-    def set_ranges(self, x: tuple[float, float], y: tuple[float, float]) -> None:
-        """Show the visible ranges (fields being edited are left alone)."""
-        for axis, (lo, hi) in (("x", x), ("y", y)):
+    def set_ranges(
+        self,
+        x: tuple[float, float],
+        y: tuple[float, float],
+        z: tuple[float, float] | None = None,
+    ) -> None:
+        """Show the visible ranges (fields being edited are left alone); a range for z
+        when the graph is a 3D view."""
+        self.z_row.visible = z is not None
+        ranges = [("x", x), ("y", y)] + ([("z", z)] if z is not None else [])
+        for axis, (lo, hi) in ranges:
             for edit, value in zip(self.bounds[axis], (lo, hi), strict=True):
                 if edit not in self._editing:
                     edit.value = format_value(value, 6)

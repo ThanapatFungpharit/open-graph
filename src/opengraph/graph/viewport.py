@@ -22,11 +22,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
-import gmpy2
 import numpy as np
 from numpy.typing import NDArray
 
 from opengraph.engine import precise
+from opengraph.engine.multiprecision import gmpy2
 from opengraph.engine.sampling import ViewRect, from_axis, to_axis
 
 T = TypeVar("T", float, NDArray[np.float64])

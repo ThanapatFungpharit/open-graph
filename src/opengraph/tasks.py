@@ -1,5 +1,11 @@
 """Background symbolic tasks, run in worker processes so they can be cancelled.
 
+Android and iOS don't let an application start processes. There each lane runs its tasks
+on a thread instead (:class:`_ThreadLane`), which still keeps the interface responsive.
+A thread can't be killed, so cancelling raises an exception inside it (:class:`_ThreadJob`).
+SymPy is pure Python, so that stops a computation within moments. Only a single operation
+in C can hold it up, such as multiplying integers of millions of digits.
+
 Each *lane* is a FIFO queue served by one long-lived child process
 (``python -m opengraph.engine.worker``), started on first use. A lane runs one task at a
 time; the others wait their turn. Cancelling a queued task just drops it; cancelling the
@@ -13,6 +19,7 @@ from __future__ import annotations
 
 import enum
 import io
+import logging
 import os
 import subprocess
 import sys
@@ -30,7 +37,89 @@ from opengraph.engine import worker
 from opengraph.engine.compiler import CasRequest, SymbolicTarget
 from opengraph.engine.errors import MathError
 
+log = logging.getLogger(__name__)
+
 HISTORY_LIMIT = 100  # finished tasks kept for the Tasks window
+
+
+# How often an exception is raised again in a thread that hasn't stopped: SymPy and mpmath
+# have a few bare ``except:`` clauses, which can catch the first one.
+_STOP_RETRY_S = 0.2
+
+
+class TaskCancelled(BaseException):
+    """Raised inside a worker thread to stop its task.
+
+    Not an ``Exception``, so that neither SymPy's handlers nor :func:`worker.run` take it
+    for a failed computation; ``finally`` clauses and ``with`` blocks still clean up.
+    """
+
+
+def _raise_in_thread(thread_id: int) -> bool:
+    """Make :class:`TaskCancelled` happen in a thread, at its next bytecode. False if this
+    Python can't: the thread then runs on, and only its result is dropped."""
+    try:
+        import ctypes
+
+        delivered = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(thread_id), ctypes.py_object(TaskCancelled)
+        )
+    except (ImportError, AttributeError, OSError):
+        log.warning("This Python can't interrupt a thread: cancelled tasks run to their end")
+        return False
+    return bool(delivered == 1)
+
+
+class _ThreadJob:
+    """A task on a thread of its own, which can be told to stop.
+
+    The lock makes sure no exception is raised once the thread has finished its work: it
+    would escape the thread's function, or hit a new thread with a reused identifier.
+    """
+
+    def __init__(self, task: Task, run: Callable[[_ThreadJob], None]) -> None:
+        self.task = task
+        self._lock = threading.Lock()
+        self._finished = False
+        self._ended = threading.Event()
+        self._thread = threading.Thread(
+            target=run, args=(self,), name="opengraph-task", daemon=True
+        )
+        self._thread.start()
+
+    def finish(self) -> None:
+        """Called by the job's own thread when it has nothing left to do. An exception
+        raised just before this can still arrive during it, so it starts over then."""
+        while True:
+            try:
+                with self._lock:
+                    self._finished = True
+                self._ended.set()
+                return
+            except TaskCancelled:
+                continue
+
+    def stop(self) -> None:
+        """Keep interrupting the thread, from the side, until it has finished."""
+        threading.Thread(target=self._interrupt, name="opengraph-stop", daemon=True).start()
+
+    def _interrupt(self) -> None:
+        while True:
+            with self._lock:
+                thread_id = self._thread.ident
+                if self._finished or thread_id is None or not _raise_in_thread(thread_id):
+                    return
+            if self._ended.wait(_STOP_RETRY_S):
+                return
+
+    def wait(self, timeout: float) -> bool:
+        """Whether the thread has finished, waiting at most ``timeout`` seconds."""
+        return self._ended.wait(timeout)
+
+
+def _uses_threads() -> bool:
+    """Whether tasks run on threads, as they must where processes aren't allowed."""
+    return bool(os.environ.get("OPENGRAPH_THREAD_WORKERS")) or sys.platform in ("android", "ios")
 
 
 class TaskState(enum.Enum):
@@ -197,6 +286,51 @@ class _Lane:
         return task
 
 
+class _ThreadLane(_Lane):
+    """One queue, with each task on a thread of its own (see the module's documentation)."""
+
+    def __init__(self, manager: TaskManager) -> None:
+        super().__init__(manager)
+        self.job: _ThreadJob | None = None
+
+    def dispatch(self) -> None:
+        if self.current is not None or not self.queue:
+            return
+        task = self.current = self.queue.popleft()
+        task.state, task.started = TaskState.RUNNING, time.monotonic()
+        self.job = _ThreadJob(task, self._run)
+        self.manager.changed.emit()
+
+    def _run(self, job: _ThreadJob) -> None:
+        """Worker thread: compute, then report on the interface loop."""
+        task = job.task
+        try:
+            outcome = worker.run(task.operation, task.target)
+            job.finish()
+            events.post(partial(self._on_result, task, outcome))
+        except TaskCancelled:
+            pass
+        finally:
+            job.finish()
+
+    def _on_result(self, task: Task, outcome: tuple[bool, object]) -> None:
+        if task is not self.current:
+            return  # cancelled, or the application is closing
+        self.current, self.job = None, None
+        ok, payload = outcome
+        if ok:
+            self.manager._finish(task, TaskState.DONE, payload)
+        else:
+            task.detail = str(payload)
+            self.manager._finish(task, TaskState.FAILED, MathError(task.detail))
+        self.dispatch()
+
+    def kill_worker(self) -> None:
+        job, self.job = self.job, None
+        if job is not None:
+            job.stop()
+
+
 def _close(process: subprocess.Popen[bytes]) -> None:
     for stream in (process.stdin, process.stdout):
         if stream is not None:
@@ -239,7 +373,9 @@ class TaskManager:
         self._next_id += 1
         self._tasks.append(task)
         self._trim_history()
-        queue = self._lanes.setdefault(lane, _Lane(self))
+        queue = self._lanes.get(lane)
+        if queue is None:
+            queue = self._lanes[lane] = _ThreadLane(self) if _uses_threads() else _Lane(self)
         queue.queue.append(task)
         self.changed.emit()
         queue.dispatch()

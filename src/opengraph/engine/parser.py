@@ -55,9 +55,15 @@ _CLAUSE_WORDS = frozenset({"in", "from", "to", "at", "degree", "order"})
 
 class _Form:
     def __init__(
-        self, required: tuple[str, ...], optional: tuple[str, ...], items: int, example: str
+        self,
+        required: tuple[str, ...],
+        optional: tuple[str, ...],
+        items: int,
+        example: str,
+        max_items: int | None = None,
     ) -> None:
         self.required, self.optional, self.items, self.example = required, optional, items, example
+        self.max_items = items if max_items is None else max_items
 
 
 _RANGE = ("from", "to")
@@ -78,7 +84,7 @@ _FORMS: dict[str, _Form] = {
     "collect": _Form((), (), 1, "collect(a x + b x for x)"),
     "apart": _Form((), (), 1, "apart(1/(x^2 - 1) for x)"),
     "plot": _Form(("in",), (), 1, "plot(t^2 for t in (0, 2])"),
-    "parametric": _Form(("in",), (), 2, "parametric(cos(u), sin(u) for u in [0, 2pi])"),
+    "parametric": _Form(("in",), (), 2, "parametric(cos(u), sin(u) for u in [0, 2pi])", 3),
 }
 
 
@@ -487,8 +493,10 @@ class _Parser:
                 following.span,
                 incomplete=self.unfinished(following),
             )
-        if len(items) != form.items:
+        if not form.items <= len(items) <= form.max_items:
             count = "one expression" if form.items == 1 else f"{form.items} expressions"
+            if form.max_items != form.items:
+                count = f"{form.items} or {form.max_items} expressions"
             raise ParseError(
                 f"{name} takes {count} before 'for'; write {form.example}", opener.span
             )
@@ -513,17 +521,17 @@ class _Parser:
         return self.advance()
 
     def parse_point(self, name_token: Token) -> Node:
-        """``point[x, y]``."""
+        """``point[x, y]`` or ``point[x, y, z]``."""
         opener = self.advance()
         if self.at_op("]"):
             raise ParseError(
-                "point[] needs two coordinates, like point[1, 2]",
+                "point[] needs two or three coordinates, like point[1, 2]",
                 _join(name_token.span, self.peek().span),
             )
         items, closer = self.parse_list(opener)
         span = _join(name_token.span, closer.span)
-        if len(items) != 2:
-            raise ParseError("A point needs exactly two coordinates, like point[1, 2]", span)
+        if len(items) not in (2, 3):
+            raise ParseError("A point needs two or three coordinates, like point[1, 2]", span)
         return TupleExpr(tuple(items), span)
 
     def parse_group(self, opener: Token) -> Node:

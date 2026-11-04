@@ -191,11 +191,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/60/44/bfb1cbfd2b4ef3e12e2ae4f0bc76ff0eb56175fb6c90c35d1d8b40bf507e/flet-1.0.4-py3-none-any.whl", hash = "sha256:5e6ea0a75e10ff7143ca32dc2b84117fe7c964b4ec2270cb9910598acd9ffe67", size = 635815, upload-time = "2026-10-08T22:25:01.048Z" },
 ]
 
-[package.optional-dependencies]
-desktop = [
-    { name = "flet-desktop" },
-]
-
 [[package]]
 name = "flet-desktop"
 version = "1.0.4"
@@ -765,9 +760,10 @@ name = "opengraph"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "flet", extra = ["desktop"] },
+    { name = "flet" },
+    { name = "flet-desktop", marker = "platform_system != 'iOS' and sys_platform != 'android'" },
     { name = "fonttools" },
-    { name = "gmpy2" },
+    { name = "gmpy2", marker = "platform_system != 'iOS' and sys_platform != 'android'" },
     { name = "numpy" },
     { name = "pillow" },
     { name = "sympy" },
@@ -786,10 +782,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "flet", extras = ["desktop"], specifier = ">=1.0.4" },
+    { name = "flet", specifier = "==1.0.4" },
+    { name = "flet-desktop", marker = "platform_system != 'iOS' and sys_platform != 'android'", specifier = "==1.0.4" },
     { name = "fonttools", specifier = ">=4.60" },
-    { name = "gmpy2", specifier = ">=2.3.2" },
-    { name = "numpy", specifier = ">=2.5.4" },
+    { name = "gmpy2", marker = "platform_system != 'iOS' and sys_platform != 'android'", specifier = ">=2.3.2" },
+    { name = "numpy", specifier = ">=2.4.6" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "sympy", specifier = ">=1.14.0" },
 ]

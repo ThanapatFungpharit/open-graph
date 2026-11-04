@@ -7,6 +7,9 @@ by :meth:`GraphSettings.normalized` rather than rejected:
 * a polar grid needs equal, linear axes (circles must look like circles), so it turns
   logarithmic axes off and locks the aspect ratio;
 * complex mode plots the complex plane, which is linear in both directions.
+
+A 3D view (see :mod:`~opengraph.graph.view3d`) uses the grid and axis switches and the x
+and y steps. Its axes are always linear, and its ranges are part of the view.
 """
 
 from __future__ import annotations
