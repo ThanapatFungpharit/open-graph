@@ -12,3 +12,5 @@ src/opengraph/native/*.c
 *.pyd
 *.so
 *.html
+# Editor settings
+.idea/

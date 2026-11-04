@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_call:  # the application builds run these first
 
 jobs:
   test:

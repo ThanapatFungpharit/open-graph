@@ -782,8 +782,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "flet", specifier = ">=1.0.4" },
-    { name = "flet-desktop", marker = "sys_platform != 'android' and sys_platform != 'ios'", specifier = ">=1.0.4" },
+    { name = "flet", specifier = "==1.0.4" },
+    { name = "flet-desktop", marker = "sys_platform != 'android' and sys_platform != 'ios'", specifier = "==1.0.4" },
     { name = "fonttools", specifier = ">=4.60" },
     { name = "gmpy2", marker = "sys_platform != 'android' and sys_platform != 'ios'", specifier = ">=2.3.2" },
     { name = "numpy", specifier = ">=2.4.6" },

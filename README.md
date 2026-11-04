@@ -85,12 +85,20 @@ The same application runs as an Android or iOS app. [Flet](https://flet.dev) bui
 the first build downloads Flutter and, for Android, its SDK. iOS needs a Mac with Xcode.
 
 ```bash
-uv run --with flet-cli flet build apk   # Android: an installable package in build/apk
-uv run --with flet-cli flet build ipa   # iOS: needs a signing identity
+uv run --with flet-cli==1.0.4 flet build apk --python-version 3.13   # build/apk
+uv run --with flet-cli==1.0.4 flet build ipa --python-version 3.13   # needs a signing identity
 ```
 
-`[tool.flet]` in `pyproject.toml` holds the app's name and identifier. The Actions workflow
-**Mobile build** builds the Android package on demand.
+`[tool.flet]` in `pyproject.toml` holds the app's name and identifier. The version of
+`flet-cli` has to be the one `pyproject.toml` pins for `flet`.
+
+The Actions workflow **Application builds** builds for Windows, Linux, macOS (Intel and
+Apple silicon) and Android (APK and AAB), and keeps the results as artifacts of the run. It
+runs by hand from the Actions tab, and for a tag `v1.2.3`, which must match the version in
+`pyproject.toml`. Android builds use a debug signature unless the repository has the secrets
+`ANDROID_KEY_STORE_BASE64`, `ANDROID_KEY_STORE_PASSWORD`, `ANDROID_KEY_PASSWORD` and
+`ANDROID_KEY_ALIAS`. These builds don't compile the Cython kernels, so they use the Python
+fallbacks, which give the same results more slowly.
 
 On a touch screen one finger pans the graph (or turns a 3D view), and two fingers pinch to
 zoom and move it. Tap, or press and hold and slide, to read coordinates. Below 720 pixels
@@ -388,8 +396,8 @@ Suitable literal points and slider-controlled point coordinates can be dragged.
 
 Tables support named list columns, formula columns, point/line styles and UTF-8 CSV
 import. Formula columns can refer to other columns and definitions without cycles.
-Documents save as `.ograph.json`; plots export as PNG/JPEG. This project is not yet
-public; no old-syntax migration layer is maintained.
+Documents save as `.ograph.json`; plots export as PNG/JPEG. The syntax may still change
+before a first release, and old spellings aren't migrated.
 
 ## Numerical limits
 
@@ -414,3 +422,8 @@ public; no old-syntax migration layer is maintained.
 
 See [design notes](docs/DESIGN.md) and the
 [semantic changes](docs/SEMANTICS.md) for implementation details.
+
+## License
+
+OpenGraph is released under the [MIT License](LICENSE). The bundled DejaVu fonts have their
+own [license](src/opengraph/ui/assets/fonts/LICENSE-DejaVu.txt).
